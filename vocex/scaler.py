@@ -9,7 +9,7 @@ class GaussianMinMaxScaler(nn.Module):
     2. Apply a min-max scaler to the data ranging from the expected minimum and maximum of a Gaussian distribution with samples N
     """
 
-    def __init__(self, width, for_tensors=True, floor=1e-6, sqrt=True):
+    def __init__(self, width, for_tensors=True, floor=1e-6, sqrt=True, n_to_fit=10_000):
         if for_tensors:
             super().__init__()
             self.isnan = torch.isnan
@@ -40,34 +40,40 @@ class GaussianMinMaxScaler(nn.Module):
             self.floor = floor
             self._n = _n
             self.for_tensors = for_tensors
+        self.min_set = False
+        self.max_set = False
+        self.n_to_fit = n_to_fit
+        self.is_fit = False
 
     def partial_fit(self, X):
         scale_change = False
-        if self.isnan(self.max):
+        if not self.max_set:
             self.max = X.max()
-            if self.for_tensors:
-                self.max = self.max.detach()
+            # if self.for_tensors:
+            #     self.max = self.max.detach()
             scale_change = True
+            self.max_set = True
         else:
             max_candidate = X.max()
             if max_candidate > self.max:
-                if self.for_tensors:
-                    self.max = max_candidate.detach()
-                else:
-                    self.max = max_candidate
+                # if self.for_tensors:
+                #     self.max = max_candidate.detach()
+                #else:
+                self.max = max_candidate
                 scale_change = True
-        if self.isnan(self.min):
+        if not self.min_set:
             self.min = X.min()
-            if self.for_tensors:
-                self.min = self.min.detach()
+            # if self.for_tensors:
+            #     self.min = self.min.detach()
             scale_change = True
+            self.min_set = True
         else:
             min_candidate = X.min()
             if min_candidate < self.min:
-                if self.for_tensors:
-                    self.min = min_candidate.detach()
-                else:
-                    self.min = min_candidate
+                # if self.for_tensors:
+                #     self.min = min_candidate.detach()
+                #else:
+                self.min = min_candidate
                 scale_change = True
         if scale_change:
             if self.for_tensors:
@@ -82,6 +88,8 @@ class GaussianMinMaxScaler(nn.Module):
                     self._scale = self.max - self.min + self.floor
         # add numpy array size to n, regardless of shape
         self._n += len(X.flatten())
+        if self._n >= self.n_to_fit:
+            self.is_fit = True
 
     def transform(self, X):
         X = X - self.min + self.floor
@@ -110,3 +118,7 @@ class GaussianMinMaxScaler(nn.Module):
             X = X ** 2
         X = X + self.min - self.floor
         return X
+
+    @property
+    def is_fitted(self):
+        return self.is_fit

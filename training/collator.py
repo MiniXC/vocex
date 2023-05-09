@@ -53,6 +53,7 @@ class Collator():
             "n_mels": 80,
         },
         local_data_dir="training/data",
+        return_keys=["mel", "dvector", "measures"],
     ):
         self.sampling_rate = audio_args["sample_rate"]
         self.measures = measures
@@ -91,6 +92,7 @@ class Collator():
         self.include_audio = include_audio
         self.overwrite_max_length = overwrite_max_length
         self.audio_args = audio_args
+        self.return_keys = return_keys
 
     @staticmethod
     def drc(x, C=1, clip_val=1e-7):
@@ -111,9 +113,6 @@ class Collator():
         result = {}
 
         for i, row in enumerate(batch):
-            row["speaker"] = row["speaker"].decode("utf-8")
-            row["phones"] = [p.decode("utf-8") for p in row["phones"]]
-            row["audio"] = row["audio"].decode("utf-8")
             phones = row["phones"]
             batch[i]["phones"] = np.array([self.phone2idx[phone.replace("ˌ", "")] for phone in row["phones"]])
             sr = self.sampling_rate
@@ -206,58 +205,69 @@ class Collator():
             max_frame_length = max(self.max_frame_length, max_frame_length)
             max_phone_length = max(self.max_phone_length, max_phone_length)
         max_audio_length = (max_frame_length * self.audio_args["hop_length"])
-        batch[0]["audio"] = ConstantPad1d(
-            (0, max_audio_length - len(batch[0]["audio"])), 0
-        )(torch.tensor(batch[0]["audio"]))
-        batch[0]["mel"] = ConstantPad2d(
-            (0, 0, 0, max_frame_length - batch[0]["mel"].shape[0]), 0
-        )(batch[0]["mel"])
-        batch[0]["phone_durations"] = ConstantPad1d(
-            (0, max_phone_length - len(batch[0]["phone_durations"])), 0
-        )(torch.tensor(batch[0]["phone_durations"]))
-        batch[0]["durations"] = ConstantPad1d(
-            (0, max_phone_length - len(batch[0]["durations"])), 0
-        )(torch.tensor(batch[0]["durations"]))
-        batch[0]["phones"] = ConstantPad1d((0, max_phone_length - len(batch[0]["phones"])), 0
-        )(torch.tensor(batch[0]["phones"]))
-        if self.measures is not None:
+        if "audio" in self.return_keys or "dvector" in self.return_keys:
+            batch[0]["audio"] = ConstantPad1d(
+                (0, max_audio_length - len(batch[0]["audio"])), 0
+            )(torch.tensor(batch[0]["audio"]))
+        if "mel" in self.return_keys:
+            batch[0]["mel"] = ConstantPad2d(
+                (0, 0, 0, max_frame_length - batch[0]["mel"].shape[0]), 0
+            )(batch[0]["mel"])
+        if "phone_durations" in self.return_keys:
+            batch[0]["phone_durations"] = ConstantPad1d(
+                (0, max_phone_length - len(batch[0]["phone_durations"])), 0
+            )(torch.tensor(batch[0]["phone_durations"]))
+        if "durations" in self.return_keys:
+            batch[0]["durations"] = ConstantPad1d(
+                (0, max_phone_length - len(batch[0]["durations"])), 0
+            )(torch.tensor(batch[0]["durations"]))
+        if "phones" in self.return_keys:
+            batch[0]["phones"] = ConstantPad1d((0, max_phone_length - len(batch[0]["phones"])), 0
+            )(torch.tensor(batch[0]["phones"]))
+        if self.measures is not None and "measures" in self.return_keys:
             for measure in self.measures:
                 batch[0]["measures"][measure.name] = ConstantPad1d(
                     (0, max_frame_length - len(batch[0]["measures"][measure.name])), 0
                 )(torch.tensor(batch[0]["measures"][measure.name]))
         for i in range(1, len(batch)):
-            batch[i]["audio"] = torch.tensor(batch[i]["audio"])
-            batch[i]["phone_durations"] = torch.tensor(batch[i]["phone_durations"])
-            batch[i]["durations"] = torch.tensor(batch[i]["durations"])
-            batch[i]["phones"] = torch.tensor(batch[i]["phones"])
-            if self.measures is not None:
+            if "audio" in self.return_keys or "dvector" in self.return_keys:
+                batch[i]["audio"] = torch.tensor(batch[i]["audio"])
+            if "phone_durations" in self.return_keys:
+                batch[i]["phone_durations"] = torch.tensor(batch[i]["phone_durations"])
+            if "durations" in self.return_keys:
+                batch[i]["durations"] = torch.tensor(batch[i]["durations"])
+            if "phones" in self.return_keys:
+                batch[i]["phones"] = torch.tensor(batch[i]["phones"])
+            if self.measures is not None and "measures" in self.return_keys:
                 for measure in self.measures:
                     batch[i]["measures"][measure.name] = torch.tensor(batch[i]["measures"][measure.name])
         with torch.no_grad():
-            result["dvector"] = []
-            for x in batch:
-                try:
-                    embed = self.dvector.model.embed_utterance(self.wav2mel.model(x["audio"].unsqueeze(0), 22050)).squeeze(0)
-                except RuntimeError:
-                    embed = torch.zeros(256)
-                result["dvector"].append(embed)
-            result["dvector"] = torch.stack(result["dvector"])
-            torch.cuda.empty_cache()
-        result["audio"] = pad_sequence([x["audio"] for x in batch], batch_first=True)
-        result["mel"] = pad_sequence([x["mel"] for x in batch], batch_first=True)
-        result["phone_durations"] = pad_sequence([x["phone_durations"] for x in batch], batch_first=True)
-        result["durations"] = [x["durations"] for x in batch]
-        result["durations"] = pad_sequence([x["durations"] for x in batch], batch_first=True)
-        result["phones"] = pad_sequence([x["phones"] for x in batch], batch_first=True)
-        speakers = [str(x["speaker"]).split("/")[-1] if ("/" in str(x["speaker"])) else x["speaker"] for x in batch]
-        # speaker2idx
-        result["speaker"] = torch.tensor([self.speaker2idx[x] for x in speakers])
-        result["measures"] = {}
+            if "dvector" in self.return_keys:
+                result["dvector"] = []
+                for x in batch:
+                    try:
+                        embed = self.dvector.model.embed_utterance(self.wav2mel.model(x["audio"].unsqueeze(0), 22050)).squeeze(0)
+                    except RuntimeError:
+                        embed = torch.zeros(256)
+                    result["dvector"].append(embed)
+                result["dvector"] = torch.stack(result["dvector"])
+                torch.cuda.empty_cache()
+        if "audio" in self.return_keys:
+            result["audio"] = pad_sequence([x["audio"] for x in batch], batch_first=True)
+        if "mel" in self.return_keys:
+            result["mel"] = pad_sequence([x["mel"] for x in batch], batch_first=True)
+        if "phone_durations" in self.return_keys:
+            result["phone_durations"] = pad_sequence([x["phone_durations"] for x in batch], batch_first=True)
+        if "durations" in self.return_keys:
+            result["durations"] = pad_sequence([x["durations"] for x in batch], batch_first=True)
+        if "phones" in self.return_keys:
+            result["phones"] = pad_sequence([x["phones"] for x in batch], batch_first=True)
+        if "speaker" in self.return_keys:
+            speakers = [str(x["speaker"]).split("/")[-1] if ("/" in str(x["speaker"])) else x["speaker"] for x in batch]
+            # speaker2idx
+            result["speaker"] = torch.tensor([self.speaker2idx[x] for x in speakers])
 
-        if not self.include_audio:
-            del result["audio"]
-
-        if self.overwrite_max_length:
+        if self.overwrite_max_length and "phone_durations" in self.return_keys and "val_ind" in self.return_keys:
             MAX_FRAMES = self.max_frame_length
             MAX_PHONES = self.max_phone_length
             BATCH_SIZE = len(batch)
@@ -265,10 +275,15 @@ class Collator():
             result["val_ind"] = torch.arange(0, MAX_PHONES).repeat(BATCH_SIZE).reshape(BATCH_SIZE, MAX_PHONES)
             result["val_ind"] = result["val_ind"].flatten().repeat_interleave(result["phone_durations"].flatten(), dim=0).reshape(BATCH_SIZE, MAX_FRAMES)
 
-        if self.measures is not None:
+        if self.measures is not None and "measures" in self.return_keys:
+            result["measures"] = {}
             for measure in self.measures:
                 result["measures"][measure.name] = pad_sequence([x["measures"][measure.name] for x in batch], batch_first=True)
-        else:
+        elif "measures" in self.return_keys:
             result["measures"] = None
+
+        result = {
+            k: v for k, v in result.items() if k in self.return_keys
+        }
 
         return result

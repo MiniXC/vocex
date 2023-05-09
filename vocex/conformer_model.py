@@ -1,16 +1,18 @@
 import torch
 from torch import nn
 import lightning.pytorch as pl
+from tqdm.auto import tqdm
 from .transformer import TransformerEncoder, PositionalEncoding
 from .conformer_layer import ConformerLayer
 from .scaler import GaussianMinMaxScaler
 from .utils import Transpose
+from .tpu_metrics_delta import MetricsDelta
+from time import time
 
 class Vocex(pl.LightningModule):
 
     def __init__(
         self,
-        layers=8,
         measures=["energy", "pitch", "srmr", "snr"],
         in_channels=80,
         filter_size=256,
@@ -24,6 +26,7 @@ class Vocex(pl.LightningModule):
         lr=1e-4,
     ):
         super().__init__()
+        self.save_hyperparameters()
         self.measures = measures
         self.noise_factor = noise_factor
         in_channels = in_channels
@@ -120,8 +123,20 @@ class Vocex(pl.LightningModule):
             module.bias.data.zero_()
             module.weight.data.fill_(1.0)
 
+    def fit_scalers(self, dataloader, n_batches=1000):
+        for i, batch in tqdm(enumerate(dataloader), desc="Fitting scalers", total=n_batches):
+            self.scalers["mel"].partial_fit(batch["mel"])
+            for k in self.measures:
+                self.scalers[k].partial_fit(batch["measures"][k])
+            self.scalers["dvector"].partial_fit(batch["dvector"])
+            if i >= n_batches:
+                break
+        for k in self.scalers:
+            self.scalers[k].is_fit = True
+
     def forward(self, mel, dvector=None, measures=None, inference=False):
-        if self.scalers["mel"]._n <= 1_000_000:
+        start = time()
+        if not self.scalers["mel"].is_fit:
             self.scalers["mel"].partial_fit(mel)
         x = self.scalers["mel"].transform(mel)
         x = x + torch.randn_like(x) * self.noise_factor
@@ -151,9 +166,9 @@ class Vocex(pl.LightningModule):
             loss_dict = {}
             for i, measure in enumerate(self.measures):
                 measure_out = out[:, i]
-                if self.scalers[measure]._n <= 1_000_000:
+                if not self.scalers[measure].is_fit:
                     self.scalers[measure].partial_fit(measures[measure])
-                measure_results[measure] = measure_out #self.scalers[measure].transform(measure_out)
+                measure_results[measure] = measure_out
                 measure_true[measure] = self.scalers[measure].transform(measures[measure])
             measures_loss = 0
             for measure in self.measures:
@@ -174,12 +189,13 @@ class Vocex(pl.LightningModule):
         )
         dvector_pred = self.dvector_linear(dvector_input)
         if dvector is not None:
-            if self.scalers["dvector"]._n <= 1_000_000:
+            if not self.scalers["dvector"].is_fit:
                 self.scalers["dvector"].partial_fit(dvector)
             true_dvector = self.scalers["dvector"].transform(dvector)
             dvector_loss = nn.MSELoss()(dvector_pred, true_dvector)
             loss_dict["dvector"] = dvector_loss
             loss = loss + dvector_loss
+        end = time()
         return {
             "loss": loss,
             "compound_losses": loss_dict,
@@ -192,15 +208,17 @@ class Vocex(pl.LightningModule):
         dvector = batch["dvector"]
         measures = batch["measures"]
         loss = self(mel, dvector, measures)
-        result_dict = {
-            f"train_loss_{k}": v for k, v in loss["compound_losses"].items()
-        }
-        result_dict["train_loss"] = loss["loss"]
-        self.log_dict(
-            result_dict,
-            prog_bar=True,
-            sync_dist=True,
-        )
+        # check if current step is a logging step
+        if batch_idx % self.trainer.log_every_n_steps == 0:
+            result_dict = {
+                f"train/{k}": v for k, v in loss["compound_losses"].items()
+            }
+            result_dict["train/loss"] = loss["loss"]
+            self.log_dict(
+                result_dict,
+                rank_zero_only=True,
+                logger=True,
+            )
         return loss["loss"]
 
     def validation_step(self, batch, batch_idx):
@@ -221,7 +239,7 @@ class Vocex(pl.LightningModule):
                     f"val_loss_{measure}": loss["compound_losses"][measure],
                     f"val_mae_{measure}": mae,
                 },
-                prog_bar=True,
+                logger=True,
                 sync_dist=True,
             )
         # d-vector
@@ -231,14 +249,14 @@ class Vocex(pl.LightningModule):
         dvector_true = dvector
         dvector_mae = nn.L1Loss()(dvector_results, dvector_true)
         norm_dvector_mae = dvector_mae / torch.mean(dvector_true)
-        self.log_dict(
-            {
-                "val_loss_dvector": loss["compound_losses"]["dvector"],
-                "val_mae_dvector": dvector_mae,
-            },
-            prog_bar=True,
-            sync_dist=True,
-        )
+        # self.log_dict(
+        #     {
+        #         "val_loss_dvector": loss["compound_losses"]["dvector"],
+        #         "val_mae_dvector": dvector_mae,
+        #     },
+        #     rank_zero_only=True,
+        #     logger=True,
+        # )
 
     def configure_optimizers(self):
         optimizer = torch.optim.Adam(self.parameters(), lr=self.lr)

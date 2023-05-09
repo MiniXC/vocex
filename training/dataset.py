@@ -14,7 +14,8 @@ from multiprocessing import cpu_count
 from phones.convert import Converter
 import torchaudio
 import torchaudio.transforms as AT
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader, IterableDataset
+import polars as plr
 
 from training.collator import Collator
 from training.measures import (
@@ -35,8 +36,8 @@ _URLS = {
     "train-other-500": _URL + "train-other-500.tar.gz",
 }
 
-class DfDataset(Dataset):
-    def __init__(self, df, max_lengths, min_size=10_000):
+class DfDataset(IterableDataset):
+    def __init__(self, cache_dir, name, df, max_lengths, min_size=10_000):
         self.list = []
         for _, row in tqdm(df.iterrows(), total=len(df), desc="loading data"):
             # 10kB is the minimum size of a wav file for our purposes
@@ -55,23 +56,20 @@ class DfDataset(Dataset):
                     self.list.append(result)
         # convert to dataframe for easier indexing and to avoid "too many open files" error
         self.df = pd.DataFrame(self.list)
-        # set datatypes
-        self.df["id"] = self.df["id"].apply(lambda x: x.encode("utf-8"))
-        self.df["speaker"] = self.df["speaker"].apply(lambda x: x.encode("utf-8"))
-        self.df["text"] = self.df["text"].apply(lambda x: x.encode("utf-8"))
-        self.df["phones"] = self.df["phones"].apply(lambda x: [p.encode("utf-8") for p in x])
-        self.df["phone_durations"] = self.df["phone_durations"].apply(lambda x: [int(d) for d in x])
-        self.df["audio"] = self.df["audio"].apply(lambda x: x.encode("utf-8"))
-        self.df["start"] = self.df["start"].astype(np.float32)
-        self.df["end"] = self.df["end"].astype(np.float32)
         # index
         self.df = self.df.set_index("id")
         self.df = self.df.sort_index()
         self.df = self.df.reset_index()
+        # to parquet, compute hash
+        # save to parquet
+        self.df.to_parquet(os.path.join(cache_dir, f"df_{name}.parquet"))
+        # create polars dataframe
+        self.df = plr.read_parquet(os.path.join(cache_dir, f"df_{name}.parquet"))
+        # delete list
         del self.list
 
-    def __getitem__(self, idx):
-        return self.df.iloc[idx]
+    def __iter__(self):
+        return self.df.iter_rows(named=True)
         
     def __len__(self):
         return len(self.df)
@@ -255,33 +253,42 @@ class LibriTTSDataModule(pl.LightningDataModule):
             "dev": os.path.join(self.cache_dir, "dev_cache.pkl"),
             "test": os.path.join(self.cache_dir, "test_cache.pkl"),
         }
-        if os.path.exists(cache_dict["train"]) and self.use_cache:
-            self.data_train = pickle.load(open(cache_dict["train"], "rb"))
-        else:
-            self.data_train = DfDataset(
-                self._create_data([ds_dict["train-clean-100"], ds_dict["train-clean-360"], ds_dict["train-other-500"]]),
-                max_lengths=self.max_lengths,
-                min_size=self.min_audio_file_size,
-            )
-            pickle.dump(self.data_train, open(cache_dict["train"], "wb"))
-        if os.path.exists(cache_dict["dev"]) and self.use_cache:
-            self.data_dev = pickle.load(open(cache_dict["dev"], "rb"))
-        else:
-            self.data_dev = DfDataset(
-                self._create_data([ds_dict["dev-clean"], ds_dict["dev-other"]]),
-                max_lengths=self.max_lengths,
-                min_size=self.min_audio_file_size,
-            )
-            pickle.dump(self.data_dev, open(cache_dict["dev"], "wb"))
-        if os.path.exists(cache_dict["test"]) and self.use_cache:
-            self.data_test = pickle.load(open(cache_dict["test"], "rb"))
-        else:
-            self.data_test = DfDataset(
-                self._create_data([ds_dict["test-clean"], ds_dict["test-other"]]),
-                max_lengths=self.max_lengths,
-                min_size=self.min_audio_file_size,
-            )
-            pickle.dump(self.data_test, open(cache_dict["test"], "wb"))
+        if stage in ["fit", "scalers"] or stage is None:
+            if os.path.exists(cache_dict["train"]) and self.use_cache:
+                self.data_train = pickle.load(open(cache_dict["train"], "rb"))
+            else:
+                self.data_train = DfDataset(
+                    self.cache_dir,
+                    "train",
+                    self._create_data([ds_dict["train-clean-100"], ds_dict["train-clean-360"], ds_dict["train-other-500"]]),
+                    max_lengths=self.max_lengths,
+                    min_size=self.min_audio_file_size,
+                )
+                pickle.dump(self.data_train, open(cache_dict["train"], "wb"))
+        if stage in ["fit", "dev"] or stage is None:
+            if os.path.exists(cache_dict["dev"]) and self.use_cache:
+                self.data_dev = pickle.load(open(cache_dict["dev"], "rb"))
+            else:
+                self.data_dev = DfDataset(
+                    self.cache_dir,
+                    "dev",
+                    self._create_data([ds_dict["dev-clean"], ds_dict["dev-other"]]),
+                    max_lengths=self.max_lengths,
+                    min_size=self.min_audio_file_size,
+                )
+                pickle.dump(self.data_dev, open(cache_dict["dev"], "wb"))
+        if stage == "test" or stage is None:
+            if os.path.exists(cache_dict["test"]) and self.use_cache:
+                self.data_test = pickle.load(open(cache_dict["test"], "rb"))
+            else:
+                self.data_test = DfDataset(
+                    self.cache_dir,
+                    "test",
+                    self._create_data([ds_dict["test-clean"], ds_dict["test-other"]]),
+                    max_lengths=self.max_lengths,
+                    min_size=self.min_audio_file_size,
+                )
+                pickle.dump(self.data_test, open(cache_dict["test"], "wb"))
         # self.data_all = pd.concat([self.data_train, self.data_dev, self.data_test])
 
     def train_dataloader(self):
