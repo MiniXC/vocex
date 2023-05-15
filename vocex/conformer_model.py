@@ -1,15 +1,13 @@
 import torch
 from torch import nn
-import lightning.pytorch as pl
 from tqdm.auto import tqdm
 from .transformer import TransformerEncoder, PositionalEncoding
 from .conformer_layer import ConformerLayer
 from .scaler import GaussianMinMaxScaler
-from .utils import Transpose
+from .utils import Transpose, NoamLR
 from .tpu_metrics_delta import MetricsDelta
-from time import time
 
-class Vocex(pl.LightningModule):
+class Vocex(nn.Module):
 
     def __init__(
         self,
@@ -23,10 +21,8 @@ class Vocex(pl.LightningModule):
         dvector_dim=256,
         dvector_nlayers=2,
         noise_factor=0.1,
-        lr=1e-4,
     ):
         super().__init__()
-        self.save_hyperparameters()
         self.measures = measures
         self.noise_factor = noise_factor
         in_channels = in_channels
@@ -97,18 +93,7 @@ class Vocex(pl.LightningModule):
         self.scaler_dict["dvector"] = GaussianMinMaxScaler(10, sqrt=False)
         self.scaler_dict = nn.ModuleDict(self.scaler_dict)
 
-        self.has_teacher = False
-        self.lr = lr
-
         self.apply(self._init_weights)
-
-    def set_teacher(self, teacher):
-        self._external_teacher = teacher
-        self.scaler_dict = teacher.scaler_dict
-        self.has_teacher = True
-        # freeze teacher
-        for param in self._external_teacher.parameters():
-            param.requires_grad = False
 
     @property
     def scalers(self):
@@ -135,7 +120,6 @@ class Vocex(pl.LightningModule):
             self.scalers[k].is_fit = True
 
     def forward(self, mel, dvector=None, measures=None, inference=False):
-        start = time()
         if not self.scalers["mel"].is_fit:
             self.scalers["mel"].partial_fit(mel)
         x = self.scalers["mel"].transform(mel)
@@ -149,19 +133,6 @@ class Vocex(pl.LightningModule):
         measure_true = {}
         loss = 0
         loss_dict = {}
-        assert not (self.has_teacher and (measures is not None))
-        assert (self.has_teacher or (measures is not None) or inference)
-        ### teacher distillation
-        if self.has_teacher:
-            measures_loss = 0
-            teacher_results = self._external_teacher(mel)["logits"]
-            for i, measure in enumerate(self.measures):
-                m_loss = nn.MSELoss()(out[:, i], teacher_results[:, i])
-                measure_results[measure] = out[:, i]
-                loss_dict[measure] = m_loss
-                measures_loss = measures_loss + m_loss
-            loss = loss + measures_loss / len(self.measures)
-        ### measures (without teacher)
         if measures is not None:
             loss_dict = {}
             for i, measure in enumerate(self.measures):
@@ -195,75 +166,10 @@ class Vocex(pl.LightningModule):
             dvector_loss = nn.MSELoss()(dvector_pred, true_dvector)
             loss_dict["dvector"] = dvector_loss
             loss = loss + dvector_loss
-        end = time()
-        return {
+        results = {
             "loss": loss,
             "compound_losses": loss_dict,
             "logits": out,
             "logits_dvector": dvector_pred,
         }
-
-    def training_step(self, batch, batch_idx):
-        mel = batch["mel"]
-        dvector = batch["dvector"]
-        measures = batch["measures"]
-        loss = self(mel, dvector, measures)
-        # check if current step is a logging step
-        if batch_idx % self.trainer.log_every_n_steps == 0:
-            result_dict = {
-                f"train/{k}": v for k, v in loss["compound_losses"].items()
-            }
-            result_dict["train/loss"] = loss["loss"]
-            self.log_dict(
-                result_dict,
-                rank_zero_only=True,
-                logger=True,
-            )
-        return loss["loss"]
-
-    def validation_step(self, batch, batch_idx):
-        mel = batch["mel"]
-        dvector = batch["dvector"]
-        measures = batch["measures"]
-        loss = self(mel, dvector, measures)
-        for measure in self.measures:
-            # calculate MAE
-            measure_results = self.scalers[measure].inverse_transform(
-                loss["logits"][:, self.measures.index(measure)]
-            )
-            measure_true = measures[measure]
-            mae = nn.L1Loss()(measure_results, measure_true)
-            norm_mae = mae / torch.mean(measure_true)
-            self.log_dict(
-                {
-                    f"val_loss_{measure}": loss["compound_losses"][measure],
-                    f"val_mae_{measure}": mae,
-                },
-                logger=True,
-                sync_dist=True,
-            )
-        # d-vector
-        dvector_results = self.scalers["dvector"].inverse_transform(
-            loss["logits_dvector"]
-        )
-        dvector_true = dvector
-        dvector_mae = nn.L1Loss()(dvector_results, dvector_true)
-        norm_dvector_mae = dvector_mae / torch.mean(dvector_true)
-        # self.log_dict(
-        #     {
-        #         "val_loss_dvector": loss["compound_losses"]["dvector"],
-        #         "val_mae_dvector": dvector_mae,
-        #     },
-        #     rank_zero_only=True,
-        #     logger=True,
-        # )
-
-    def configure_optimizers(self):
-        optimizer = torch.optim.Adam(self.parameters(), lr=self.lr)
-        scheduler = torch.optim.lr_scheduler.OneCycleLR(
-            optimizer, max_lr=self.lr, total_steps=self.trainer.estimated_stepping_batches
-        )
-        return {
-            "optimizer": optimizer,
-            "lr_scheduler": scheduler,
-        }
+        return results
