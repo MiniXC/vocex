@@ -109,6 +109,9 @@ class Vocex(nn.Module):
             module.weight.data.fill_(1.0)
 
     def fit_scalers(self, dataloader, n_batches=1000):
+        # reset scalers
+        for k in self.scalers:
+            self.scalers[k].is_fit = False
         for i, batch in tqdm(enumerate(dataloader), desc="Fitting scalers", total=n_batches):
             self.scalers["mel"].partial_fit(batch["mel"])
             for k in self.measures:
@@ -131,7 +134,6 @@ class Vocex(nn.Module):
         out = out.transpose(1, 2)
         measure_results = {}
         measure_true = {}
-        loss = 0
         loss_dict = {}
         if measures is not None:
             loss_dict = {}
@@ -141,13 +143,14 @@ class Vocex(nn.Module):
                     self.scalers[measure].partial_fit(measures[measure])
                 measure_results[measure] = measure_out
                 measure_true[measure] = self.scalers[measure].transform(measures[measure])
-            measures_loss = 0
+            measures_losses = []
             for measure in self.measures:
                 m_loss = nn.MSELoss()(measure_results[measure], measure_true[measure])
                 loss_dict[measure] = m_loss
-                measures_loss += m_loss
-            loss = measures_loss / len(self.measures)
-            loss = loss + measures_loss / len(self.measures)
+                measures_losses.append(m_loss)
+            loss = sum(measures_losses) / len(self.measures)
+        else:
+            loss = None
         ### d-vector
         # predict d-vector using global average and max pooling as input
         out_dvec = self.dvector_layers(x)
@@ -165,11 +168,28 @@ class Vocex(nn.Module):
             true_dvector = self.scalers["dvector"].transform(dvector)
             dvector_loss = nn.MSELoss()(dvector_pred, true_dvector)
             loss_dict["dvector"] = dvector_loss
-            loss = loss + dvector_loss
-        results = {
-            "loss": loss,
-            "compound_losses": loss_dict,
-            "logits": out,
-            "logits_dvector": dvector_pred,
-        }
-        return results
+            if loss is not None:
+                loss += dvector_loss
+                loss /= 2
+            else:
+                loss = dvector_loss
+        if not inference:
+            results = {
+                "loss": loss,
+                "compound_losses": loss_dict,
+            }
+            return results
+        else:
+            # transform back to original scale
+            for measure in self.measures:
+                measure_results[measure] = self.scalers[measure].inverse_transform(
+                    measure_results[measure]
+                )
+            dvector_pred = self.scalers["dvector"].inverse_transform(dvector_pred)
+            results = {
+                "loss": loss,
+                "compound_losses": loss_dict,
+                "measures": measure_results,
+                "dvector": dvector_pred,
+            }
+            return results

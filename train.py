@@ -13,6 +13,7 @@ import seaborn as sns
 import matplotlib.pyplot as plt
 
 from vocex import Vocex
+from vocex.utils import NoamLR
 from training.arguments import Args
 
 MEASURE_DICT = {
@@ -22,22 +23,24 @@ MEASURE_DICT = {
     "snr": SNRMeasure,
 }
 
-def eval_loop(model, eval_ds, step):
-    eval_ds = tqdm(eval_ds, desc="Evaluating", total=len(eval_ds))
-    model.eval()
+def eval_loop(accelerator, model, eval_ds, step):
     loss = 0.0
     loss_dict = {}
     i = 0
+    progress_bar = tqdm(range(len(eval_ds)), desc="eval")
     for batch in eval_ds:
-        outputs = model(**batch)
+        outputs = model(**batch, inference=True)
         if i == 0:
             # create a lineplot plot for each scalar in the first batch
-            logits = outputs["logits"]
-            for j, measure in enumerate(model.measures):
+            for measure in model.measures:
                 fig, ax = plt.subplots()
-                pred_vals = logits[0, j]
-                pred_vals = model.scalers[measure].inverse_transform(pred_vals).detach().cpu().numpy()
-                true_vals = batch["measures"][measure][0].detach().cpu().numpy()
+                pred_vals = outputs["measures"][measure][0]
+                true_vals = batch["measures"][measure][0]
+                pred_vals, true_vals = accelerator.gather_for_metrics((pred_vals, true_vals))
+                pred_vals = model.scalers[measure].transform(pred_vals)
+                true_vals = model.scalers[measure].transform(true_vals)
+                pred_vals = pred_vals.detach().cpu().numpy()
+                true_vals = true_vals.detach().cpu().numpy()
                 sns.lineplot(x=range(len(pred_vals)), y=pred_vals, ax=ax, label="pred")
                 sns.lineplot(x=range(len(true_vals)), y=true_vals, ax=ax, label="true")
                 ax.set_title(measure)
@@ -48,9 +51,9 @@ def eval_loop(model, eval_ds, step):
         loss += outputs["loss"].item()
         for k, v in outputs["compound_losses"].items():
             loss_dict[k] = loss_dict.get(k, 0.0) + v.item()
+        progress_bar.update(1)
     wandb.log({"eval/loss": loss / len(eval_ds)}, step=step)
     wandb.log({f"eval/{k}_loss": v / len(eval_ds) for k, v in loss_dict.items()}, step=step)
-    model.train()
 
 def main():
     parser = HfArgumentParser([Args])
@@ -65,17 +68,20 @@ def main():
     wandb.init(
         name=args.wandb_run_name,
         project=args.wandb_project,
+        mode=args.wandb_mode,
     )
     wandb.config.update(args)
-
-    libritts = load_dataset(args.dataset)
-    train_ds = libritts[args.train_split]
-    eval_ds = libritts[args.eval_split]
 
     if not args.bf16:
         accelerator = Accelerator()
     else:
         accelerator = Accelerator(mixed_precision="bf16")
+
+    with accelerator.main_process_first():
+        libritts = load_dataset(args.dataset)
+
+    train_ds = libritts[args.train_split]
+    eval_ds = libritts[args.eval_split]
 
     speaker2idx = json.load(open(args.speaker2idx))
     phone2idx = json.load(open(args.phone2idx))
@@ -102,6 +108,9 @@ def main():
         dropout=args.dropout,
     )
 
+    if args.resume_from_checkpoint:
+        model.load_state_dict(torch.load(args.resume_from_checkpoint))
+
     train_dataloader = torch.utils.data.DataLoader(
         train_ds,
         batch_size=args.batch_size,
@@ -118,22 +127,26 @@ def main():
         prefetch_factor=args.prefetch_factor,
     )
 
-    model.fit_scalers(train_dataloader, args.fit_scalers_steps)
+    if args.fit_scalers:
+        model.fit_scalers(train_dataloader, args.fit_scalers_steps)
 
     optimizer = torch.optim.AdamW(
         model.parameters(),
         lr=args.learning_rate,
         weight_decay=args.weight_decay,
+        betas=[0.9, 0.98],
+        eps=1e-8,
+    )
+
+    lr_scheduler = NoamLR(
+        optimizer,
+        warmup_steps=args.warmup_steps,
     )
 
     num_epochs = args.max_epochs
     num_training_steps = num_epochs * len(train_dataloader)
 
-    lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, T_max=num_training_steps, eta_min=args.learning_rate_min
-    )
-
-    progress_bar = tqdm(range(num_training_steps))
+    progress_bar = tqdm(range(num_training_steps), desc="training", disable=not accelerator.is_local_main_process)
 
     train_dataloader, eval_dataloader, model, optimizer = accelerator.prepare(
         train_dataloader, eval_dataloader, model, optimizer
@@ -143,22 +156,51 @@ def main():
 
     step = 0
 
+
     for epoch in range(num_epochs):
         for batch in train_dataloader:
             with accelerator.accumulate(model):
                 step += 1
-                outputs = model(**batch)
-                loss = outputs["loss"]
-                accelerator.backward(loss)
-                optimizer.step()
+                if accelerator.sync_gradients:
+                    accelerator.clip_grad_value_(model.parameters(), args.max_grad_norm)
+                if step % args.gradient_sync_every == 0:
+                    outputs = model(**batch)
+                    loss = outputs["loss"] / args.gradient_accumulation_steps
+                    accelerator.backward(loss)
+                else:
+                    with accelerator.no_sync(model):
+                        outputs = model(**batch)
+                        loss = outputs["loss"] / args.gradient_accumulation_steps
+                        accelerator.backward(loss)
                 lr_scheduler.step()
-                optimizer.zero_grad()
+                if step % args.gradient_accumulation_steps == 0:
+                    optimizer.step()
+                    optimizer.zero_grad()
+                steps_until_logging = args.log_every - (step % args.log_every)
+                ## accumulate losses for logging
+                if steps_until_logging <= args.train_loss_logging_sum_steps:
+                    if steps_until_logging == args.train_loss_logging_sum_steps:
+                        loss_dict = {
+                            k: v for k, v in outputs["compound_losses"].items()
+                        }
+                        loss_dict["loss"] = outputs["loss"]
+                    else:
+                        for k, v in outputs["compound_losses"].items():
+                            loss_dict[k] += v
+                        loss_dict["loss"] += outputs["loss"]
+                ## log losses
                 if step % args.log_every == 0:
-                    wandb.log({"train/loss": loss.item(), "lr": optimizer.param_groups[0]["lr"]}, step=step)
-                    wandb.log({f"train/{k}": v.item() for k, v in outputs["compound_losses"].items()}, step=step)
+                    lr = lr_scheduler.get_last_lr()[0]
+                    wandb.log({"train/loss": loss_dict["loss"]/args.train_loss_logging_sum_steps, "lr": lr}, step=step)
+                    wandb.log({f"train/{k}": loss_dict[k]/args.train_loss_logging_sum_steps for k, v in outputs["compound_losses"].items()}, step=step)
                     wandb.log({"train/global_step": step}, step=step)
+                ## evaluate
                 if step % args.eval_every == 0:
-                    eval_loop(model, eval_dataloader, step)
+                    model.eval()
+                    with torch.no_grad():
+                        eval_loop(accelerator, model, eval_dataloader, step)
+                    model.train()
+                ## save checkpoint
                 if step % args.save_every == 0:
                     accelerator.wait_for_everyone()
                     unwrapped_model = accelerator.unwrap_model(model)
