@@ -47,7 +47,7 @@ class Vocex(nn.Module):
                 conv_kernel=(kernel_size, 1),
                 batch_first=True,
                 dropout=dropout,
-                conv_depthwise=True,
+                conv_depthwise=depthwise,
             ),
             num_layers=measure_nlayers,
         )
@@ -71,19 +71,21 @@ class Vocex(nn.Module):
                 conv_kernel=(kernel_size, 1),
                 batch_first=True,
                 dropout=dropout,
-                conv_depthwise=True,
+                conv_depthwise=depthwise,
             ),
             num_layers=dvector_nlayers,
         )
 
-        dvector_input_dim = filter_size * 2
+        dvector_input_dim = filter_size * 4
         
         self.dvector_linear = nn.Sequential(
-            nn.Linear(dvector_input_dim, 1024),
+            nn.Linear(dvector_input_dim, dvector_input_dim*2),
             nn.ReLU(),
-            nn.Linear(1024, 1024),
+            nn.Linear(dvector_input_dim*2, dvector_input_dim*2),
             nn.ReLU(),
-            nn.Linear(1024, dvector_dim),
+            nn.Linear(dvector_input_dim*2, dvector_input_dim*2),
+            nn.ReLU(),
+            nn.Linear(dvector_input_dim*2, dvector_dim),
         )
 
         self.scaler_dict = {
@@ -158,6 +160,8 @@ class Vocex(nn.Module):
             [
                 torch.mean(out_dvec, dim=1),
                 torch.max(out_dvec, dim=1)[0],
+                torch.mean(out_conv, dim=1),
+                torch.max(out_conv, dim=1)[0],
             ],
             dim=1,
         )
@@ -166,7 +170,7 @@ class Vocex(nn.Module):
             if not self.scalers["dvector"].is_fit:
                 self.scalers["dvector"].partial_fit(dvector)
             true_dvector = self.scalers["dvector"].transform(dvector)
-            dvector_loss = nn.MSELoss()(dvector_pred, true_dvector)
+            dvector_loss = nn.L1Loss()(dvector_pred, true_dvector)
             loss_dict["dvector"] = dvector_loss
             if loss is not None:
                 loss += dvector_loss

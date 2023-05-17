@@ -15,7 +15,7 @@ class Args:
     # model
     measure_nlayers: int = 8
     dvector_nlayers: int = 4
-    depthwise: bool = True
+    depthwise: bool = False
     noise_factor: float = 0.1
     filter_size: int = 256
     kernel_size: int = 3
@@ -31,10 +31,11 @@ class Args:
     save_every: int = 5000
     checkpoint_dir: str = "checkpoints"
     batch_size: int = 8
-    gradient_accumulation_steps: int = 1
+    gradient_accumulation_steps: int = 8
     gradient_sync_every: int = 100
     bf16: bool = False
     resume_from_checkpoint: str = None
+    strict_load: bool = False
     max_grad_norm: float = 1.0
     train_loss_logging_sum_steps: int = 100
     # wandb

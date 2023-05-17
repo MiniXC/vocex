@@ -11,6 +11,7 @@ from transformers import HfArgumentParser
 import wandb
 import seaborn as sns
 import matplotlib.pyplot as plt
+import numpy as np
 
 from vocex import Vocex
 from vocex.utils import NoamLR
@@ -47,6 +48,44 @@ def eval_loop(accelerator, model, eval_ds, step):
                 # log the figure to wandb
                 wandb.log({f"eval/{measure}": wandb.Image(fig)}, step=step)
                 plt.close(fig)
+            # create an image plot for the dvectors in the first batch
+            fig, ax = plt.subplots()
+            pred_vals = outputs["dvector"] # (batch_size, dvector_dim)
+            true_vals = batch["dvector"]
+            pred_vals, true_vals = accelerator.gather_for_metrics((pred_vals, true_vals))
+            pred_vals = model.scalers["dvector"].transform(pred_vals)
+            true_vals = model.scalers["dvector"].transform(true_vals)
+            # for each dvector, draw as images next to each other
+            pred_val = pred_vals.reshape(-1, 16, 16)
+            true_val = true_vals.reshape(-1, 16, 16)
+            pred_val = pred_val.detach().cpu().numpy()
+            true_val = true_val.detach().cpu().numpy()
+            # subplots
+            fig, axs = plt.subplots(len(pred_val), 3, sharey=True, figsize=(4, 10))
+            min_val = np.min([np.min(pred_val), np.min(true_val)])
+            max_val = np.max([np.max(pred_val), np.max(true_val)])
+            max_error = np.max(np.abs(pred_val-true_val))
+            fig.suptitle(f"min={min_val:.2f}, max={max_val:.2f}\nmax_error={max_error:.2f}")
+            for i in range(len(pred_val)):
+                axs[i, 0].imshow(pred_val[i], interpolation='nearest', vmin=min_val, vmax=max_val)
+                axs[i, 1].imshow(true_val[i], interpolation='nearest', vmin=min_val, vmax=max_val)
+                axs[i, 2].imshow(
+                    np.abs(pred_val[i]-true_val[i]),
+                    cmap=sns.color_palette("light:r", as_cmap=True),
+                    interpolation='nearest',
+                    vmin=0,
+                    vmax=max_error
+                )
+                if i == 0:
+                    axs[i, 0].set_title("predicted")
+                    axs[i, 1].set_title("ground truth")
+                    axs[i, 2].set_title("abs. error")
+                axs[i, 0].axis('off')
+                axs[i, 1].axis('off')
+                axs[i, 2].axis('off')
+            plt.tight_layout()
+            wandb.log({f"eval/dvector": wandb.Image(fig)}, step=step)
+            plt.close(fig)
         i += 1
         loss += outputs["loss"].item()
         for k, v in outputs["compound_losses"].items():
@@ -109,7 +148,24 @@ def main():
     )
 
     if args.resume_from_checkpoint:
-        model.load_state_dict(torch.load(args.resume_from_checkpoint))
+        try:
+            model.load_state_dict(torch.load(args.resume_from_checkpoint), strict=True)
+        except RuntimeError as e:
+            if args.strict_load:
+                raise e
+            else:
+                print("Could not load model from checkpoint. Trying without strict loading, and removing mismatched keys.")
+                current_model_dict = model.state_dict()
+                loaded_state_dict = torch.load(args.resume_from_checkpoint)
+                new_state_dict={
+                    k:v if v.size()==current_model_dict[k].size() 
+                    else current_model_dict[k] 
+                    for k,v 
+                    in zip(current_model_dict.keys(), loaded_state_dict.values())
+                }
+                model.load_state_dict(new_state_dict, strict=False)
+
+    model.scalers["dvector"].expected_max = torch.tensor(10.0)
 
     train_dataloader = torch.utils.data.DataLoader(
         train_ds,
@@ -156,7 +212,6 @@ def main():
 
     step = 0
 
-
     for epoch in range(num_epochs):
         for batch in train_dataloader:
             with accelerator.accumulate(model):
@@ -179,7 +234,7 @@ def main():
                 steps_until_logging = args.log_every - (step % args.log_every)
                 ## accumulate losses for logging
                 if steps_until_logging <= args.train_loss_logging_sum_steps:
-                    if steps_until_logging == args.train_loss_logging_sum_steps:
+                    if steps_until_logging == args.train_loss_logging_sum_steps or step == 1:
                         loss_dict = {
                             k: v for k, v in outputs["compound_losses"].items()
                         }
@@ -191,9 +246,13 @@ def main():
                 ## log losses
                 if step % args.log_every == 0:
                     lr = lr_scheduler.get_last_lr()[0]
-                    wandb.log({"train/loss": loss_dict["loss"]/args.train_loss_logging_sum_steps, "lr": lr}, step=step)
-                    wandb.log({f"train/{k}": loss_dict[k]/args.train_loss_logging_sum_steps for k, v in outputs["compound_losses"].items()}, step=step)
+                    log_loss = loss_dict["loss"]
+                    log_loss_dict = {f"train/{k}": loss_dict[k].item()/args.train_loss_logging_sum_steps for k, v in outputs["compound_losses"].items()}
+                    wandb.log({"train/loss": log_loss.item()/args.train_loss_logging_sum_steps, "lr": lr}, step=step)
+                    wandb.log(log_loss_dict, step=step)
                     wandb.log({"train/global_step": step}, step=step)
+                    print(f"step {step}: loss={log_loss.item()/args.train_loss_logging_sum_steps:.4f}, lr={lr:.8f}")
+                    print({k.split('/')[1]: np.round(v, 4) for k, v in log_loss_dict.items()})
                 ## evaluate
                 if step % args.eval_every == 0:
                     model.eval()
@@ -207,6 +266,8 @@ def main():
                     torch.save(unwrapped_model.state_dict(), f"{args.checkpoint_dir}/model_{step}.pt")
                     accelerator.wait_for_everyone()
                 progress_bar.update(1)
+                # set description
+                progress_bar.set_description(f"epoch {epoch+1}/{num_epochs}")
 
 if __name__ == "__main__":
     main()
