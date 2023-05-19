@@ -57,10 +57,15 @@ class Vocex(nn.Module):
             nn.ReLU(),
             nn.Linear(1024, 1024),
             nn.ReLU(),
+            nn.Linear(1024, 1024),
+            nn.ReLU(),
             nn.Linear(1024, num_outputs),
         )
 
         dvector_dim = dvector_dim
+        
+        self.dvector_in_x = nn.Linear(in_channels, filter_size)
+        self.dvector_in_hidden = nn.Linear(filter_size, filter_size)
         
         self.dvector_layers = TransformerEncoder(
             ConformerLayer(
@@ -128,7 +133,7 @@ class Vocex(nn.Module):
         if not self.scalers["mel"].is_fit:
             self.scalers["mel"].partial_fit(mel)
         x = self.scalers["mel"].transform(mel)
-        x = x + torch.randn_like(x) * self.noise_factor
+        x = x + (torch.randn_like(x) * x.std() + x.mean()) * self.noise_factor
         x = self.in_layer(x)
         x = self.positional_encoding(x)
         out_conv = self.layers(x)
@@ -155,7 +160,11 @@ class Vocex(nn.Module):
             loss = None
         ### d-vector
         # predict d-vector using global average and max pooling as input
-        out_dvec = self.dvector_layers(x)
+        x = self.scalers["mel"].transform(mel)
+        x = x + (torch.randn_like(x) * x.std() + x.mean()) * self.noise_factor
+        dvec_in = self.dvector_in_x(x) + self.dvector_in_hidden(out_conv)
+        dvec_in = self.positional_encoding(dvec_in)
+        out_dvec = self.dvector_layers(dvec_in)
         dvector_input = torch.cat(
             [
                 torch.mean(out_dvec, dim=1),

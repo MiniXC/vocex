@@ -16,7 +16,7 @@ class Args:
     measure_nlayers: int = 8
     dvector_nlayers: int = 4
     depthwise: bool = False
-    noise_factor: float = 0.1
+    noise_factor: float = 0.01
     filter_size: int = 256
     kernel_size: int = 3
     dropout: float = 0.1
