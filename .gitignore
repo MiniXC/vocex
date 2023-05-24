@@ -3,4 +3,10 @@ __pycache__/
 lightning_logs/
 wandb/
 checkpoints/
-train.sh
+train.sh.pdm-python
+__pypackages__/
+build/
+*.lock
+*.sh
+.pdm-python
+dist/
