@@ -41,8 +41,9 @@ def eval_loop(accelerator, model, eval_ds, step):
                 pred_vals = outputs["measures"][measure][0]
                 true_vals = batch["measures"][measure][0]
                 pred_vals, true_vals = accelerator.gather_for_metrics((pred_vals, true_vals))
-                pred_vals = model.scalers[measure].transform(pred_vals)
-                true_vals = model.scalers[measure].transform(true_vals)
+                if not measure.endswith("_binary"):
+                    pred_vals = model.scalers[measure].transform(pred_vals)
+                    true_vals = model.scalers[measure].transform(true_vals)
                 pred_vals = pred_vals.detach().cpu().numpy()
                 true_vals = true_vals.detach().cpu().numpy()
                 sns.lineplot(x=range(len(pred_vals)), y=pred_vals, ax=ax, label="pred")
@@ -56,8 +57,9 @@ def eval_loop(accelerator, model, eval_ds, step):
             pred_vals = outputs["dvector"] # (batch_size, dvector_dim)
             true_vals = batch["dvector"]
             pred_vals, true_vals = accelerator.gather_for_metrics((pred_vals, true_vals))
-            pred_vals = model.scalers["dvector"].transform(pred_vals)
-            true_vals = model.scalers["dvector"].transform(true_vals)
+            if not measure.endswith("_binary"):
+                pred_vals = model.scalers["dvector"].transform(pred_vals)
+                true_vals = model.scalers["dvector"].transform(true_vals)
             # for each dvector, draw as images next to each other
             pred_val = pred_vals.reshape(-1, 16, 16)
             true_val = true_vals.reshape(-1, 16, 16)
@@ -260,18 +262,18 @@ def main():
                     wandb.log({"train/global_step": step}, step=step)
                     print(f"step={step}, lr={last_lr:.8f}:")
                     print({k.split('/')[1]: np.round(v, 4) for k, v in log_loss_dict.items()})
-                ## evaluate
-                if step % args.eval_every == 0:
-                    model.eval()
-                    with torch.no_grad():
-                        eval_loop(accelerator, model, eval_dataloader, step)
-                    model.train()
                 ## save checkpoint
                 if step % args.save_every == 0:
                     accelerator.wait_for_everyone()
                     unwrapped_model = accelerator.unwrap_model(model)
                     torch.save(unwrapped_model.state_dict(), f"{args.checkpoint_dir}/model_{step}.pt")
                     accelerator.wait_for_everyone()
+                ## evaluate
+                if step % args.eval_every == 0:
+                    model.eval()
+                    with torch.no_grad():
+                        eval_loop(accelerator, model, eval_dataloader, step)
+                    model.train()
                 progress_bar.update(1)
                 # set description
                 progress_bar.set_description(f"epoch {epoch+1}/{num_epochs}")

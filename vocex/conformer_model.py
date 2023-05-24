@@ -171,7 +171,7 @@ class Vocex(nn.Module):
                         m_loss = self.softdtw(
                             measure_results[measure]*mel_padding_mask,
                             measure_true[measure]*mel_padding_mask,
-                        )
+                        ) / 1000
                 loss_dict[measure] = m_loss
                 measures_losses.append(m_loss)
             loss = sum(measures_losses) / len(self.measures)
@@ -210,9 +210,10 @@ class Vocex(nn.Module):
         else:
             # transform back to original scale
             for measure in self.measures:
-                measure_results[measure] = self.scalers[measure].inverse_transform(
-                    measure_results[measure]
-                )
+                if not measure.endswith("_binary"):
+                    measure_results[measure] = self.scalers[measure].inverse_transform(
+                        measure_results[measure]
+                    )
             dvector_pred = self.scalers["dvector"].inverse_transform(dvector_pred)
             results = {
                 "loss": loss,
