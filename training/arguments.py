@@ -31,7 +31,7 @@ class Args:
     save_every: int = 5000
     checkpoint_dir: str = "checkpoints"
     batch_size: int = 8
-    gradient_accumulation_steps: int = 1
+    gradient_accumulation_steps: int = 8
     gradient_sync_every: int = 100
     bf16: bool = False
     resume_from_checkpoint: str = None

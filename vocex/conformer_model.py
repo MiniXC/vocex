@@ -88,7 +88,7 @@ class Vocex(nn.Module):
             k: GaussianMinMaxScaler(10) for k in self.measures
         }
         self.scaler_dict["mel"] = GaussianMinMaxScaler(10)
-        self.scaler_dict["dvector"] = GaussianMinMaxScaler(10, sqrt=False)
+        self.scaler_dict["dvector"] = GaussianMinMaxScaler(10)
         self.scaler_dict = nn.ModuleDict(self.scaler_dict)
 
         self.apply(self._init_weights)
@@ -168,7 +168,7 @@ class Vocex(nn.Module):
             loss_dict["dvector"] = dvector_loss
             if loss is not None:
                 loss += dvector_loss
-                # loss /= 2
+                loss /= 2
             else:
                 loss = dvector_loss
         if not inference:

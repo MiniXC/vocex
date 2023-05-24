@@ -13,6 +13,7 @@ import seaborn as sns
 import matplotlib.pyplot as plt
 import numpy as np
 from collections import deque
+from transformers import get_linear_schedule_with_warmup
 
 from vocex import Vocex
 from vocex.utils import NoamLR
@@ -120,7 +121,7 @@ def main():
     with accelerator.main_process_first():
         libritts = load_dataset(args.dataset)
 
-    train_ds = libritts[args.train_split]
+    train_ds = libritts[args.train_split].shuffle(seed=42)
     eval_ds = libritts[args.eval_split]
 
     speaker2idx = json.load(open(args.speaker2idx))
@@ -195,13 +196,14 @@ def main():
         eps=1e-8,
     )
 
-    lr_scheduler = NoamLR(
-        optimizer,
-        warmup_steps=args.warmup_steps,
-    )
-
     num_epochs = args.max_epochs
     num_training_steps = num_epochs * len(train_dataloader)
+
+    lr_scheduler = get_linear_schedule_with_warmup(
+        optimizer=optimizer,
+        num_warmup_steps=args.warmup_steps,
+        num_training_steps=num_training_steps,
+    )
 
     progress_bar = tqdm(range(num_training_steps), desc="training", disable=not accelerator.is_local_main_process)
 
