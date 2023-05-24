@@ -12,6 +12,7 @@ import wandb
 import seaborn as sns
 import matplotlib.pyplot as plt
 import numpy as np
+from collections import deque
 
 from vocex import Vocex
 from vocex.utils import NoamLR
@@ -190,7 +191,7 @@ def main():
         model.parameters(),
         lr=args.learning_rate,
         weight_decay=args.weight_decay,
-        betas=[0.9, 0.98],
+        betas=[0.9, 0.999],
         eps=1e-8,
     )
 
@@ -212,6 +213,11 @@ def main():
 
     step = 0
 
+    losses = deque(maxlen=100)
+    compound_losses = {k: deque(maxlen=100) for k in args.measures + ["dvector"]}
+
+    print(f"number of parameters: {sum(p.numel() for p in model.parameters())}")
+
     for epoch in range(num_epochs):
         for batch in train_dataloader:
             with accelerator.accumulate(model):
@@ -227,31 +233,26 @@ def main():
                         outputs = model(**batch)
                         loss = outputs["loss"] / args.gradient_accumulation_steps
                         accelerator.backward(loss)
+                ## add to queues
+                losses.append(outputs["loss"])
+                for k in args.measures + ["dvector"]:
+                    compound_losses[k].append(outputs["compound_losses"][k])
+
                 lr_scheduler.step()
                 if step % args.gradient_accumulation_steps == 0:
                     optimizer.step()
                     optimizer.zero_grad()
-                steps_until_logging = args.log_every - (step % args.log_every)
-                ## accumulate losses for logging
-                if steps_until_logging <= args.train_loss_logging_sum_steps:
-                    if steps_until_logging == args.train_loss_logging_sum_steps or step == 1:
-                        loss_dict = {
-                            k: v for k, v in outputs["compound_losses"].items()
-                        }
-                        loss_dict["loss"] = outputs["loss"]
-                    else:
-                        for k, v in outputs["compound_losses"].items():
-                            loss_dict[k] += v
-                        loss_dict["loss"] += outputs["loss"]
                 ## log losses
                 if step % args.log_every == 0:
-                    lr = lr_scheduler.get_last_lr()[0]
-                    log_loss = loss_dict["loss"]
-                    log_loss_dict = {f"train/{k}": loss_dict[k].item()/args.train_loss_logging_sum_steps for k, v in outputs["compound_losses"].items()}
-                    wandb.log({"train/loss": log_loss.item()/args.train_loss_logging_sum_steps, "lr": lr}, step=step)
+                    last_lr = lr_scheduler.get_last_lr()[0]
+                    log_loss_dict = {
+                        f"train/{k}": sum([l.item() for l in compound_losses[k]])/len(compound_losses[k])
+                        for k in args.measures + ["dvector"]
+                    }
+                    log_loss_dict["train/loss"] = sum([l.item() for l in losses])/len(losses)
                     wandb.log(log_loss_dict, step=step)
                     wandb.log({"train/global_step": step}, step=step)
-                    print(f"step {step}: loss={log_loss.item()/args.train_loss_logging_sum_steps:.4f}, lr={lr:.8f}")
+                    print(f"step={step}, lr={last_lr:.8f}:")
                     print({k.split('/')[1]: np.round(v, 4) for k, v in log_loss_dict.items()})
                 ## evaluate
                 if step % args.eval_every == 0:

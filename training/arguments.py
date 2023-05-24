@@ -13,9 +13,9 @@ class Args:
     fit_scalers: bool = True
     fit_scalers_steps: int = 10_000
     # model
-    measure_nlayers: int = 8
-    dvector_nlayers: int = 4
-    depthwise: bool = False
+    measure_nlayers: int = 4
+    dvector_nlayers: int = 2
+    depthwise: bool = True
     noise_factor: float = 0.01
     filter_size: int = 256
     kernel_size: int = 3
@@ -24,14 +24,14 @@ class Args:
     measures: str = "energy,pitch,srmr,snr"
     max_epochs: int = 20
     learning_rate: float = 1e-4
-    warmup_steps: int = 5000
+    warmup_steps: int = 1
     weight_decay: float = 0.01
     log_every: int = 500
     eval_every: int = 5000
     save_every: int = 5000
     checkpoint_dir: str = "checkpoints"
     batch_size: int = 8
-    gradient_accumulation_steps: int = 8
+    gradient_accumulation_steps: int = 1
     gradient_sync_every: int = 100
     bf16: bool = False
     resume_from_checkpoint: str = None

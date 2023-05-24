@@ -57,15 +57,8 @@ class Vocex(nn.Module):
             nn.ReLU(),
             nn.Linear(1024, 1024),
             nn.ReLU(),
-            nn.Linear(1024, 1024),
-            nn.ReLU(),
             nn.Linear(1024, num_outputs),
         )
-
-        dvector_dim = dvector_dim
-        
-        self.dvector_in_x = nn.Linear(in_channels, filter_size)
-        self.dvector_in_hidden = nn.Linear(filter_size, filter_size)
         
         self.dvector_layers = TransformerEncoder(
             ConformerLayer(
@@ -81,16 +74,14 @@ class Vocex(nn.Module):
             num_layers=dvector_nlayers,
         )
 
-        dvector_input_dim = filter_size * 4
+        dvector_input_dim = filter_size * 2
         
         self.dvector_linear = nn.Sequential(
-            nn.Linear(dvector_input_dim, dvector_input_dim*2),
+            nn.Linear(dvector_input_dim, 1024),
             nn.ReLU(),
-            nn.Linear(dvector_input_dim*2, dvector_input_dim*2),
+            nn.Linear(1024, 1024),
             nn.ReLU(),
-            nn.Linear(dvector_input_dim*2, dvector_input_dim*2),
-            nn.ReLU(),
-            nn.Linear(dvector_input_dim*2, dvector_dim),
+            nn.Linear(1024, dvector_dim),
         )
 
         self.scaler_dict = {
@@ -160,17 +151,11 @@ class Vocex(nn.Module):
             loss = None
         ### d-vector
         # predict d-vector using global average and max pooling as input
-        x = self.scalers["mel"].transform(mel)
-        x = x + (torch.randn_like(x) * x.std() + x.mean()) * self.noise_factor
-        dvec_in = self.dvector_in_x(x) + self.dvector_in_hidden(out_conv)
-        dvec_in = self.positional_encoding(dvec_in)
-        out_dvec = self.dvector_layers(dvec_in)
+        out_dvec = self.dvector_layers(x)
         dvector_input = torch.cat(
             [
                 torch.mean(out_dvec, dim=1),
                 torch.max(out_dvec, dim=1)[0],
-                torch.mean(out_conv, dim=1),
-                torch.max(out_conv, dim=1)[0],
             ],
             dim=1,
         )
@@ -179,11 +164,11 @@ class Vocex(nn.Module):
             if not self.scalers["dvector"].is_fit:
                 self.scalers["dvector"].partial_fit(dvector)
             true_dvector = self.scalers["dvector"].transform(dvector)
-            dvector_loss = nn.L1Loss()(dvector_pred, true_dvector)
+            dvector_loss = nn.MSELoss()(dvector_pred, true_dvector)
             loss_dict["dvector"] = dvector_loss
             if loss is not None:
                 loss += dvector_loss
-                loss /= 2
+                # loss /= 2
             else:
                 loss = dvector_loss
         if not inference:
