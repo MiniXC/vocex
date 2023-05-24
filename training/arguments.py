@@ -21,10 +21,10 @@ class Args:
     kernel_size: int = 3
     dropout: float = 0.1
     # training
-    measures: str = "energy,pitch,srmr,snr"
+    measures: str = "energy,pitch,srmr,snr,voice_activity_binary"
     max_epochs: int = 20
     learning_rate: float = 1e-4
-    warmup_steps: int = 1
+    warmup_steps: int = 1000
     weight_decay: float = 0.01
     log_every: int = 500
     eval_every: int = 5000
@@ -38,6 +38,8 @@ class Args:
     strict_load: bool = False
     max_grad_norm: float = 1.0
     train_loss_logging_sum_steps: int = 100
+    use_softdtw: bool = False
+    softdtw_gamma: float = 1.0
     # wandb
     wandb_project: str = "consistency_model"
     wandb_run_name: str = None

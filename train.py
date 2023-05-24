@@ -6,7 +6,7 @@ import torch
 from tqdm.auto import tqdm
 from datasets import load_dataset
 from speech_collator import SpeechCollator
-from speech_collator.measures import EnergyMeasure, PitchMeasure, SRMRMeasure, SNRMeasure
+from speech_collator.measures import EnergyMeasure, PitchMeasure, SRMRMeasure, SNRMeasure, VoiceActivityMeasure
 from transformers import HfArgumentParser
 import wandb
 import seaborn as sns
@@ -24,6 +24,7 @@ MEASURE_DICT = {
     "pitch": PitchMeasure,
     "srmr": SRMRMeasure,
     "snr": SNRMeasure,
+    "voice_activity_binary": VoiceActivityMeasure,
 }
 
 def eval_loop(accelerator, model, eval_ds, step):
@@ -140,6 +141,7 @@ def main():
     )
 
     model = Vocex(
+        measures=args.measures,
         measure_nlayers=args.measure_nlayers,
         dvector_nlayers=args.dvector_nlayers,
         depthwise=args.depthwise,
@@ -147,6 +149,8 @@ def main():
         filter_size=args.filter_size,
         kernel_size=args.kernel_size,
         dropout=args.dropout,
+        use_softdtw=args.use_softdtw,
+        softdtw_gamma=args.softdtw_gamma,
     )
 
     if args.resume_from_checkpoint:

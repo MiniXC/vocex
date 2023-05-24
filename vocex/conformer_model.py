@@ -6,6 +6,7 @@ from .conformer_layer import ConformerLayer
 from .scaler import GaussianMinMaxScaler
 from .utils import Transpose, NoamLR
 from .tpu_metrics_delta import MetricsDelta
+from .softdtw import SoftDTW
 
 class Vocex(nn.Module):
 
@@ -21,6 +22,8 @@ class Vocex(nn.Module):
         dvector_dim=256,
         dvector_nlayers=2,
         noise_factor=0.1,
+        use_softdtw=False,
+        softdtw_gamma=1.0,
     ):
         super().__init__()
         self.measures = measures
@@ -60,6 +63,9 @@ class Vocex(nn.Module):
             nn.Linear(1024, num_outputs),
         )
         
+        self.dvector_conv_in_layer = nn.Linear(filter_size, filter_size)
+        self.dvector_x_in_layer = nn.Linear(in_channels, filter_size)
+
         self.dvector_layers = TransformerEncoder(
             ConformerLayer(
                 filter_size,
@@ -86,10 +92,14 @@ class Vocex(nn.Module):
 
         self.scaler_dict = {
             k: GaussianMinMaxScaler(10) for k in self.measures
+            if not k.endswith("_binary")
         }
         self.scaler_dict["mel"] = GaussianMinMaxScaler(10)
         self.scaler_dict["dvector"] = GaussianMinMaxScaler(10)
         self.scaler_dict = nn.ModuleDict(self.scaler_dict)
+        self.use_softdtw = use_softdtw
+        if self.use_softdtw:
+            self.softdtw = SoftDTW(gamma=softdtw_gamma)
 
         self.apply(self._init_weights)
 
@@ -113,7 +123,8 @@ class Vocex(nn.Module):
         for i, batch in tqdm(enumerate(dataloader), desc="Fitting scalers", total=n_batches):
             self.scalers["mel"].partial_fit(batch["mel"])
             for k in self.measures:
-                self.scalers[k].partial_fit(batch["measures"][k])
+                if not k.endswith("_binary"):
+                    self.scalers[k].partial_fit(batch["measures"][k])
             self.scalers["dvector"].partial_fit(batch["dvector"])
             if i >= n_batches:
                 break
@@ -121,29 +132,46 @@ class Vocex(nn.Module):
             self.scalers[k].is_fit = True
 
     def forward(self, mel, dvector=None, measures=None, inference=False):
+        mel_padding_mask = mel.sum(dim=-1) != 0
+        mel_padding_mask = mel_padding_mask.to(torch.float32)
         if not self.scalers["mel"].is_fit:
             self.scalers["mel"].partial_fit(mel)
         x = self.scalers["mel"].transform(mel)
         x = x + (torch.randn_like(x) * x.std() + x.mean()) * self.noise_factor
-        x = self.in_layer(x)
-        x = self.positional_encoding(x)
-        out_conv = self.layers(x)
+        out = self.in_layer(x)
+        out = self.positional_encoding(out)
+        out_conv = self.layers(out)
         out = self.linear(out_conv)
         out = out.transpose(1, 2)
         measure_results = {}
         measure_true = {}
         loss_dict = {}
+        for i, measure in enumerate(self.measures):
+            measure_out = out[:, i]
+            if not measure.endswith("_binary") and not self.scalers[measure].is_fit:
+                self.scalers[measure].partial_fit(measures[measure])
+            measure_results[measure] = measure_out
+            if measure.endswith("_binary"):
+                measure_results[measure] = torch.sigmoid(measure_results[measure])
         if measures is not None:
             loss_dict = {}
-            for i, measure in enumerate(self.measures):
-                measure_out = out[:, i]
-                if not self.scalers[measure].is_fit:
-                    self.scalers[measure].partial_fit(measures[measure])
-                measure_results[measure] = measure_out
-                measure_true[measure] = self.scalers[measure].transform(measures[measure])
+            for measure in self.measures:
+                if not measure.endswith("_binary"):
+                    measure_true[measure] = self.scalers[measure].transform(measures[measure])
+                else:
+                    measure_true[measure] = measures[measure]
             measures_losses = []
             for measure in self.measures:
-                m_loss = nn.MSELoss()(measure_results[measure], measure_true[measure])
+                if measure.endswith("_binary"):
+                    m_loss = nn.BCELoss()(measure_results[measure], measure_true[measure])
+                else:
+                    if not self.use_softdtw:
+                        m_loss = nn.MSELoss()(measure_results[measure]*mel_padding_mask, measure_true[measure]*mel_padding_mask)
+                    else:
+                        m_loss = self.softdtw(
+                            measure_results[measure]*mel_padding_mask,
+                            measure_true[measure]*mel_padding_mask,
+                        )
                 loss_dict[measure] = m_loss
                 measures_losses.append(m_loss)
             loss = sum(measures_losses) / len(self.measures)
@@ -151,7 +179,9 @@ class Vocex(nn.Module):
             loss = None
         ### d-vector
         # predict d-vector using global average and max pooling as input
-        out_dvec = self.dvector_layers(x)
+        out_conv_dvec = self.dvector_conv_in_layer(out_conv)
+        x = self.dvector_x_in_layer(x)
+        out_dvec = self.dvector_layers(out_conv_dvec + x)   
         dvector_input = torch.cat(
             [
                 torch.mean(out_dvec, dim=1),
@@ -164,7 +194,7 @@ class Vocex(nn.Module):
             if not self.scalers["dvector"].is_fit:
                 self.scalers["dvector"].partial_fit(dvector)
             true_dvector = self.scalers["dvector"].transform(dvector)
-            dvector_loss = nn.MSELoss()(dvector_pred, true_dvector)
+            dvector_loss = nn.L1Loss()(dvector_pred, true_dvector)
             loss_dict["dvector"] = dvector_loss
             if loss is not None:
                 loss += dvector_loss
