@@ -101,6 +101,8 @@ class Vocex(nn.Module):
         if self.use_softdtw:
             self.softdtw = SoftDTW(gamma=softdtw_gamma)
 
+        self.verbose = False
+
         self.apply(self._init_weights)
 
     @property
@@ -139,9 +141,17 @@ class Vocex(nn.Module):
         x = self.scalers["mel"].transform(mel)
         x = x + (torch.randn_like(x) * x.std() + x.mean()) * self.noise_factor
         out = self.in_layer(x)
+        if self.verbose:
+            print(out.mean(), "1")
         out = self.positional_encoding(out)
-        out_conv = self.layers(out)
+        if self.verbose:
+            print(out.mean(), "2")
+        out_conv = self.layers(out, src_key_padding_mask=mel_padding_mask)
+        if self.verbose:
+            print(out_conv.mean(), "3")
         out = self.linear(out_conv)
+        if self.verbose:
+            print(out.mean(), "4")
         out = out.transpose(1, 2)
         measure_results = {}
         measure_true = {}
@@ -151,8 +161,6 @@ class Vocex(nn.Module):
             if not measure.endswith("_binary") and not self.scalers[measure].is_fit:
                 self.scalers[measure].partial_fit(measures[measure])
             measure_results[measure] = measure_out
-            if measure.endswith("_binary"):
-                measure_results[measure] = torch.sigmoid(measure_results[measure])
         if measures is not None:
             loss_dict = {}
             for measure in self.measures:
@@ -163,11 +171,13 @@ class Vocex(nn.Module):
             measures_losses = []
             for measure in self.measures:
                 if measure.endswith("_binary"):
-                    m_loss = nn.BCELoss()(measure_results[measure], measure_true[measure])
+                    m_loss = nn.BCEWithLogitsLoss()(measure_results[measure]*mel_padding_mask, measure_true[measure]*mel_padding_mask)
                 else:
                     if not self.use_softdtw:
                         m_loss = nn.MSELoss()(measure_results[measure]*mel_padding_mask, measure_true[measure]*mel_padding_mask)
                     else:
+                        if self.verbose:
+                            print(measure_results[measure], measure_true[measure])
                         m_loss = self.softdtw(
                             measure_results[measure]*mel_padding_mask,
                             measure_true[measure]*mel_padding_mask,
@@ -181,7 +191,7 @@ class Vocex(nn.Module):
         # predict d-vector using global average and max pooling as input
         out_conv_dvec = self.dvector_conv_in_layer(out_conv)
         x = self.dvector_x_in_layer(x)
-        out_dvec = self.dvector_layers(out_conv_dvec + x)   
+        out_dvec = self.dvector_layers(out_conv_dvec + x, src_key_padding_mask=mel_padding_mask)
         dvector_input = torch.cat(
             [
                 torch.mean(out_dvec, dim=1),
@@ -214,6 +224,8 @@ class Vocex(nn.Module):
                     measure_results[measure] = self.scalers[measure].inverse_transform(
                         measure_results[measure]
                     )
+                else:
+                    measure_results[measure] = torch.sigmoid(measure_results[measure]).detach()
             dvector_pred = self.scalers["dvector"].inverse_transform(dvector_pred)
             results = {
                 "loss": loss,

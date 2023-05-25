@@ -36,7 +36,7 @@ class Args:
     bf16: bool = False
     resume_from_checkpoint: str = None
     strict_load: bool = False
-    max_grad_norm: float = 1.0
+    max_grad_norm: float = 2.0
     train_loss_logging_sum_steps: int = 100
     use_softdtw: bool = False
     softdtw_gamma: float = 1.0

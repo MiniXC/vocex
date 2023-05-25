@@ -213,8 +213,8 @@ def main():
 
     progress_bar = tqdm(range(num_training_steps), desc="training", disable=not accelerator.is_local_main_process)
 
-    train_dataloader, eval_dataloader, model, optimizer = accelerator.prepare(
-        train_dataloader, eval_dataloader, model, optimizer
+    train_dataloader, eval_dataloader, model, optimizer, lr_scheduler = accelerator.prepare(
+        train_dataloader, eval_dataloader, model, optimizer, lr_scheduler
     )
 
     model.train()
@@ -264,15 +264,16 @@ def main():
                     print({k.split('/')[1]: np.round(v, 4) for k, v in log_loss_dict.items()})
                 ## save checkpoint
                 if step % args.save_every == 0:
-                    accelerator.wait_for_everyone()
                     unwrapped_model = accelerator.unwrap_model(model)
-                    torch.save(unwrapped_model.state_dict(), f"{args.checkpoint_dir}/model_{step}.pt")
-                    accelerator.wait_for_everyone()
+                    accelerator.save({
+                        unwrapped_model.cpu().state_dict(),
+                    }, f"{args.checkpoint_dir}/checkpoint_{step}.pt")
                 ## evaluate
                 if step % args.eval_every == 0:
                     model.eval()
                     with torch.no_grad():
                         eval_loop(accelerator, model, eval_dataloader, step)
+                    #model.verbose = True
                     model.train()
                 progress_bar.update(1)
                 # set description
