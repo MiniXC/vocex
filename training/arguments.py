@@ -27,6 +27,7 @@ class Args:
     warmup_steps: int = 1000
     weight_decay: float = 0.01
     log_every: int = 500
+    eval_only: bool = False
     eval_every: int = 5000
     save_every: int = 5000
     checkpoint_dir: str = "checkpoints"
@@ -40,6 +41,9 @@ class Args:
     train_loss_logging_sum_steps: int = 100
     use_softdtw: bool = False
     softdtw_gamma: float = 1.0
+    spec_augment: bool = False
+    spec_augment_freq_mask_prob: float = 0.25
+    spec_augment_channel_shuffle_prob: float = 0.0
     # wandb
     wandb_project: str = "consistency_model"
     wandb_run_name: str = None

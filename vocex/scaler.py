@@ -43,7 +43,7 @@ class GaussianMinMaxScaler(nn.Module):
         self.min_set = False
         self.max_set = False
         self.n_to_fit = n_to_fit
-        self.is_fit = False
+        self.is_fit = True
 
     def partial_fit(self, X):
         scale_change = False

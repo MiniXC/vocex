@@ -14,6 +14,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 from collections import deque
 from transformers import get_linear_schedule_with_warmup
+from copy import deepcopy
+from audiomentations import SpecCompose, SpecChannelShuffle, SpecFrequencyMask
 
 from vocex import Vocex
 from vocex.utils import NoamLR
@@ -44,6 +46,9 @@ def eval_loop(accelerator, model, eval_ds, step):
                 if not measure.endswith("_binary"):
                     pred_vals = model.scalers[measure].transform(pred_vals)
                     true_vals = model.scalers[measure].transform(true_vals)
+                else:
+                    pred_vals[pred_vals >= 0.5] = 1
+                    pred_vals[pred_vals < 0.5] = 0
                 pred_vals = pred_vals.detach().cpu().numpy()
                 true_vals = true_vals.detach().cpu().numpy()
                 sns.lineplot(x=range(len(pred_vals)), y=pred_vals, ax=ax, label="pred")
@@ -98,6 +103,37 @@ def eval_loop(accelerator, model, eval_ds, step):
         progress_bar.update(1)
     wandb.log({"eval/loss": loss / len(eval_ds)}, step=step)
     wandb.log({f"eval/{k}_loss": v / len(eval_ds) for k, v in loss_dict.items()}, step=step)
+
+def save_model_to_cpu(path, args, accelerator, model):
+    accelerator.save(
+        model.state_dict(),
+        path,
+    )
+    cpu_model = Vocex(
+        measures=args.measures,
+        measure_nlayers=args.measure_nlayers,
+        dvector_nlayers=args.dvector_nlayers,
+        depthwise=args.depthwise,
+        noise_factor=args.noise_factor,
+        filter_size=args.filter_size,
+        kernel_size=args.kernel_size,
+        dropout=args.dropout,
+        use_softdtw=args.use_softdtw,
+        softdtw_gamma=args.softdtw_gamma,
+    )
+    cpu_model.load_state_dict(torch.load(path))
+    cpu_model.cpu()
+    torch.save(
+        cpu_model.state_dict(),
+        path,
+    )
+
+def add_spec_augment(collate_fn, augment):
+    def new_collate_fn(batch):
+        batch = collate_fn(batch)
+        batch["mel"] = torch.stack([augment(mel.T).T for mel in batch["mel"]])
+        return batch
+    return new_collate_fn
 
 def main():
     parser = HfArgumentParser([Args])
@@ -173,13 +209,22 @@ def main():
                 }
                 model.load_state_dict(new_state_dict, strict=False)
 
-    model.scalers["dvector"].expected_max = torch.tensor(10.0)
+    if args.spec_augment:
+        augment = SpecCompose(
+            [
+                SpecChannelShuffle(p=args.spec_augment_channel_shuffle_prob),
+                SpecFrequencyMask(p=args.spec_augment_freq_mask_prob),
+            ]
+        )
+        train_collate_fn = add_spec_augment(collator.collate_fn, augment)
+    else:
+        train_collate_fn = collator.collate_fn
 
     train_dataloader = torch.utils.data.DataLoader(
         train_ds,
         batch_size=args.batch_size,
         num_workers=args.num_workers,
-        collate_fn=collator.collate_fn,
+        collate_fn=train_collate_fn,
         prefetch_factor=args.prefetch_factor,
     )
 
@@ -265,9 +310,8 @@ def main():
                 ## save checkpoint
                 if step % args.save_every == 0:
                     unwrapped_model = accelerator.unwrap_model(model)
-                    accelerator.save({
-                        unwrapped_model.cpu().state_dict(),
-                    }, f"{args.checkpoint_dir}/checkpoint_{step}.pt")
+                    save_path = f"{args.checkpoint_dir}/checkpoint_{step}.pt"
+                    save_model_to_cpu(save_path, args, accelerator, unwrapped_model)
                 ## evaluate
                 if step % args.eval_every == 0:
                     model.eval()
