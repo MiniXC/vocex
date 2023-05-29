@@ -1,5 +1,6 @@
 import json
 import sys
+import random
 
 from accelerate import Accelerator
 import torch
@@ -15,9 +16,8 @@ import numpy as np
 from collections import deque
 from transformers import get_linear_schedule_with_warmup
 from copy import deepcopy
-from audiomentations import SpecCompose, SpecChannelShuffle, SpecFrequencyMask
 
-from vocex import Vocex
+from vocex import VocexModel
 from vocex.utils import NoamLR
 from training.arguments import Args
 
@@ -109,7 +109,7 @@ def save_model_to_cpu(path, args, accelerator, model):
         model.state_dict(),
         path,
     )
-    cpu_model = Vocex(
+    cpu_model = VocexModel(
         measures=args.measures,
         measure_nlayers=args.measure_nlayers,
         dvector_nlayers=args.dvector_nlayers,
@@ -128,10 +128,33 @@ def save_model_to_cpu(path, args, accelerator, model):
         path,
     )
 
-def add_spec_augment(collate_fn, augment):
+def add_spec_augment(collate_fn, p=0.5, min_mask_fraction=0.03, max_mask_fraction=0.25):
     def new_collate_fn(batch):
         batch = collate_fn(batch)
-        batch["mel"] = torch.stack([augment(mel.T).T for mel in batch["mel"]])
+        num_frequency_bins = batch["mel"].shape[-1]
+        min_frequencies_to_mask = int(
+            round(min_mask_fraction * num_frequency_bins)
+        )
+        max_frequencies_to_mask = int(
+            round(max_mask_fraction * num_frequency_bins)
+        )
+        num_frequencies_to_mask = np.random.randint(
+            low=min_frequencies_to_mask,
+            high=max_frequencies_to_mask + 1,
+            size=(batch["mel"].shape[0],),
+        )
+        start_frequency_index = np.random.randint(
+            low=0,
+            high=num_frequency_bins - num_frequencies_to_mask + 1,
+            size=(batch["mel"].shape[0],),
+        )
+        end_frequency_index = start_frequency_index + num_frequencies_to_mask
+        mels = []
+        for mel, start, end in zip(batch["mel"], start_frequency_index, end_frequency_index):
+            if torch.rand(1) < p:
+                mel[:, start:end] = 0
+            mels.append(mel)
+        batch["mel"] = torch.stack(mels)
         return batch
     return new_collate_fn
 
@@ -178,7 +201,7 @@ def main():
         overwrite_max_length=True
     )
 
-    model = Vocex(
+    model = VocexModel(
         measures=args.measures,
         measure_nlayers=args.measure_nlayers,
         dvector_nlayers=args.dvector_nlayers,
@@ -210,13 +233,7 @@ def main():
                 model.load_state_dict(new_state_dict, strict=False)
 
     if args.spec_augment:
-        augment = SpecCompose(
-            [
-                SpecChannelShuffle(p=args.spec_augment_channel_shuffle_prob),
-                SpecFrequencyMask(p=args.spec_augment_freq_mask_prob),
-            ]
-        )
-        train_collate_fn = add_spec_augment(collator.collate_fn, augment)
+        train_collate_fn = add_spec_augment(collator.collate_fn, args.spec_augment_prob)
     else:
         train_collate_fn = collator.collate_fn
 

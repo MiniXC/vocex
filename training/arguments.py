@@ -42,8 +42,7 @@ class Args:
     use_softdtw: bool = False
     softdtw_gamma: float = 1.0
     spec_augment: bool = False
-    spec_augment_freq_mask_prob: float = 0.25
-    spec_augment_channel_shuffle_prob: float = 0.0
+    spec_augment_prob: float = 0.25
     # wandb
     wandb_project: str = "consistency_model"
     wandb_run_name: str = None

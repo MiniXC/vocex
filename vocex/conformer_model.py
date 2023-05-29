@@ -8,7 +8,7 @@ from .utils import Transpose, NoamLR
 from .tpu_metrics_delta import MetricsDelta
 from .softdtw import SoftDTW
 
-class Vocex(nn.Module):
+class VocexModel(nn.Module):
 
     def __init__(
         self,
