@@ -1,7 +1,7 @@
 
 [project]
 name = "vocex"
-version = "0.1.3"
+version = "0.1.4"
 description = "Voice Frame-Level and Utterance-Level Attribute Extraction"
 authors = [
     {name = "Christoph Minixhofer", email = "christoph.minixhofer@gmail.com"},

@@ -5,7 +5,6 @@ from .transformer import TransformerEncoder, PositionalEncoding
 from .conformer_layer import ConformerLayer
 from .scaler import GaussianMinMaxScaler
 from .utils import Transpose, NoamLR
-from .tpu_metrics_delta import MetricsDelta
 from .softdtw import SoftDTW
 
 class VocexModel(nn.Module):
