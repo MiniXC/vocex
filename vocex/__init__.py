@@ -211,7 +211,12 @@ class Vocex():
             # pad first (using reflection padding)
             if not isinstance(measure, torch.Tensor):
                 measure = torch.tensor(measure)
-            measure = torch.nn.functional.pad(measure, (convolution_window_size // 2, convolution_window_size // 2), mode="reflect")
+            if measure.shape[-1] < convolution_window_size:
+                # if measure is too short, we need to pad it with zeros on 
+                measure = torch.nn.functional.pad(measure, (convolution_window_size // 2, convolution_window_size // 2), mode="constant", value=0)
+                print("WARNING: measure is too short, padding with zeros")
+            else:
+                measure = torch.nn.functional.pad(measure, (convolution_window_size // 2, convolution_window_size // 2), mode="reflect")
             if measure.ndim == 1:
                 # add batch dimension if necessary
                 measure = measure.unsqueeze(0)
@@ -275,5 +280,4 @@ class Vocex():
             out["overall_srmr"] = (out["srmr"] * va_mask).sum(axis=-1) / va_mask.sum(axis=-1)
             if np.isnan(out["overall_srmr"]).any():
                 out["overall_srmr"][np.isnan(out["overall_srmr"])] = out["srmr"][np.isnan(out["overall_srmr"])].mean(axis=-1)
-            #out["overall_srmr"] = (out["srmr"] * out["voice_activity_binary"]).sum(axis=-1) / out["voice_activity_binary"].sum(axis=-1)
         return out

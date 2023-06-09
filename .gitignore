@@ -13,3 +13,5 @@ dist/
 plots/
 *.egg-info/
 audio/
+.pytest_cache/
+.pdm-build/

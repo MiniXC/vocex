@@ -225,3 +225,11 @@ def test_srmr_correlated(setup_data_and_model):
     print(f"SRMR correlation: {corr[0]:.4f} (p={corr[1]:.4f})")
     assert corr[0] > 0.2
     assert corr[1] < 0.05
+
+def test_numpy_array_input(setup_data_and_model):
+    dataset, _, vocex = setup_data_and_model
+    first_example = next(iter(dataset))
+    assert vocex(np.random.randn(16000), 16000)["overall_snr"].shape == (1,)
+    # no nan values in voice_activity_binary
+    assert not np.isnan(vocex(np.random.randn(16000), 16000)["voice_activity_binary"]).any()
+
