@@ -17,7 +17,7 @@ from collections import deque
 from transformers import get_linear_schedule_with_warmup
 from copy import deepcopy
 
-from vocex import VocexModel
+from vocex import VocexModel, Vocex
 from vocex.utils import NoamLR
 from training.arguments import Args
 
@@ -127,6 +127,11 @@ def save_model_to_cpu(path, args, accelerator, model):
         cpu_model.state_dict(),
         path,
     )
+    # create .ckpt file
+    vocex = Vocex(cpu_model)
+    vocex.save_checkpoint(path.replace(".pt", ".ckpt"))
+    # delete .pt file
+    os.remove(path)
 
 def add_spec_augment(collate_fn, p=0.5, min_mask_fraction=0.03, max_mask_fraction=0.25):
     def new_collate_fn(batch):
@@ -216,14 +221,14 @@ def main():
 
     if args.resume_from_checkpoint:
         try:
-            model.load_state_dict(torch.load(args.resume_from_checkpoint), strict=True)
+            model.load_state_dict(torch.load(args.resume_from_checkpoint)["state_dict"], strict=True)
         except RuntimeError as e:
             if args.strict_load:
                 raise e
             else:
                 print("Could not load model from checkpoint. Trying without strict loading, and removing mismatched keys.")
                 current_model_dict = model.state_dict()
-                loaded_state_dict = torch.load(args.resume_from_checkpoint)
+                loaded_state_dict = torch.load(args.resume_from_checkpoint)["state_dict"]
                 new_state_dict={
                     k:v if v.size()==current_model_dict[k].size() 
                     else current_model_dict[k] 

@@ -104,6 +104,22 @@ class VocexModel(nn.Module):
 
         self.apply(self._init_weights)
 
+        # save hparams
+        self.hparams = {
+            "measures": measures,
+            "in_channels": in_channels,
+            "filter_size": filter_size,
+            "kernel_size": kernel_size,
+            "dropout": dropout,
+            "depthwise": depthwise,
+            "measure_nlayers": measure_nlayers,
+            "dvector_dim": dvector_dim,
+            "dvector_nlayers": dvector_nlayers,
+            "noise_factor": noise_factor,
+            "use_softdtw": use_softdtw,
+            "softdtw_gamma": softdtw_gamma,
+        }
+
     @property
     def scalers(self):
         return self.scaler_dict
@@ -132,9 +148,13 @@ class VocexModel(nn.Module):
         for k in self.scalers:
             self.scalers[k].is_fit = True
 
-    def forward(self, mel, dvector=None, measures=None, inference=False):
+    def forward(self, mel, dvector=None, measures=None, inference=False, return_activations=False, return_attention=False):
         mel_padding_mask = mel.sum(dim=-1) != 0
         mel_padding_mask = mel_padding_mask.to(torch.float32)
+
+        if return_activations:
+            self.layers.return_additional_layers = list(range(self.hparams["measure_nlayers"]))
+
         if not self.scalers["mel"].is_fit:
             self.scalers["mel"].partial_fit(mel)
         x = self.scalers["mel"].transform(mel)
@@ -145,13 +165,23 @@ class VocexModel(nn.Module):
         out = self.positional_encoding(out)
         if self.verbose:
             print(out.mean(), "2")
-        out_conv = self.layers(out, src_key_padding_mask=mel_padding_mask)
+        res = self.layers(out, src_key_padding_mask=mel_padding_mask, need_weights=return_attention)
+        if return_activations:
+            activations = res["activations"]
+            out_conv = res["output"]
+            self.layers.return_additional_layers = None
+        if return_attention:
+            attention = res["attention"]
+            out_conv = res["output"]
+        if not return_activations and not return_attention:
+            out_conv = res
         if self.verbose:
             print(out_conv.mean(), "3")
         out = self.linear(out_conv)
         if self.verbose:
             print(out.mean(), "4")
         out = out.transpose(1, 2)
+
         measure_results = {}
         measure_true = {}
         loss_dict = {}
@@ -215,6 +245,10 @@ class VocexModel(nn.Module):
                 "loss": loss,
                 "compound_losses": loss_dict,
             }
+            if return_activations:
+                results["activations"] = [a.detach() for a in activations]
+            if return_attention:
+                results["attention"] = [a.detach() for a in attention]
             return results
         else:
             # transform back to original scale
@@ -232,4 +266,8 @@ class VocexModel(nn.Module):
                 "measures": measure_results,
                 "dvector": dvector_pred,
             }
+            if return_activations:
+                results["activations"] = [a.detach() for a in activations]
+            if return_attention:
+                results["attention"] = [a.detach() for a in attention]
             return results

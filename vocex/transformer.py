@@ -30,15 +30,15 @@ class TransformerEncoder(nn.Module):
         encoder_layer,
         num_layers,
         norm=None,
-        return_additional_layer=None,
+        return_additional_layers=None,
     ):
         super(TransformerEncoder, self).__init__()
         self.layers = nn.ModuleList([copy.deepcopy(encoder_layer) for i in range(num_layers)])
         self.num_layers = num_layers
         self.norm = norm
-        self.return_additional_layer = return_additional_layer
+        self.return_additional_layers = return_additional_layers
 
-    def forward(self, src, mask=None, src_key_padding_mask=None, condition=None):
+    def forward(self, src, mask=None, src_key_padding_mask=None, condition=None, need_weights=False):
             if src_key_padding_mask is not None:
                 _skpm_dtype = src_key_padding_mask.dtype
                 if _skpm_dtype != torch.bool and not torch.is_floating_point(src_key_padding_mask):
@@ -47,19 +47,42 @@ class TransformerEncoder(nn.Module):
             output = src
             src_key_padding_mask_for_layers = src_key_padding_mask
 
-            output_for_return = None
+            output_for_return = []
+
+            if need_weights:
+                weight_list = []
 
             for i, mod in enumerate(self.layers):
                 if condition is not None:
                     output = output + condition
-                output = mod(output, src_mask=mask, src_key_padding_mask=src_key_padding_mask_for_layers)
-                if self.return_additional_layer is not None and i == self.return_additional_layer:
-                    output_for_return = output
+                if need_weights:
+                    output, weights = mod(output, src_mask=mask, src_key_padding_mask=src_key_padding_mask_for_layers, need_weights=need_weights)
+                    weight_list.append(weights)
+                else:
+                    output = mod(output, src_mask=mask, src_key_padding_mask=src_key_padding_mask_for_layers)
+                if self.return_additional_layers is not None and i in self.return_additional_layers:
+                    output_for_return.append(output)
 
             if self.norm is not None:
                 output = self.norm(output)
 
-            if output_for_return is not None:
-                return output, output_for_return
+            if self.return_additional_layers is not None:
+                if need_weights:
+                    return {
+                        "output": output,
+                        "activations": output_for_return,
+                        "attention": weight_list,
+                    }
+                else:
+                    return {
+                        "output": output,
+                        "activations": output_for_return,
+                    }
             else:
-                return output
+                if need_weights:
+                    return {
+                        "output": output,
+                        "attention": weight_list,
+                    }
+                else:
+                    return output
