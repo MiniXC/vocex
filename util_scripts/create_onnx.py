@@ -15,7 +15,7 @@ def export_onnx(checkpoint, onnx_path):
     model = vocex.model
     model.onnx_export = True
 
-    dummy_input = torch.randn(1, 256, 80)
+    dummy_input = torch.randn(1, 512, 80)
     torch.onnx.export(model, dummy_input, onnx_path, verbose=False)
 
 def compress_onnx(checkpoint, onnx_path):
@@ -49,7 +49,7 @@ def check_onnx(onnx_path):
 def check_onnxruntime(checkpoint, onnx_path, use_float16=False):
     # decompress the onnx file
     sess = ort.InferenceSession(onnx_path)
-    random_data = torch.randn(1, 256, 80)
+    random_data = torch.randn(1, 512, 80)
     if use_float16:
         random_data = random_data.to(dtype=torch.float16)
     outputs = sess.run(None, {'mel': random_data.numpy()})
