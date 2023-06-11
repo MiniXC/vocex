@@ -233,3 +233,17 @@ def test_numpy_array_input(setup_data_and_model):
     # no nan values in voice_activity_binary
     assert not np.isnan(vocex(np.random.randn(16000), 16000)["voice_activity_binary"]).any()
 
+def test_speaker_avatar(setup_data_and_model):
+    _, _, vocex = setup_data_and_model
+    #iter_dataset = iter(dataset)
+    #first_example = next(iter_dataset)
+    #second_example = next(iter_dataset)
+    import torchaudio
+    first_example, sr = torchaudio.load("celina_phone_example.wav")
+    result = vocex(first_example, sr, speaker_avatar=True)
+    plt.figure(figsize=(5,5))
+    plt.imshow(result["avatars"][0], aspect="auto", origin="lower")
+    plt.tight_layout()
+    plt.savefig("plots/speaker_avatar.png")
+
+    assert result["avatars"].shape == (1, 8, 8, 3)

@@ -158,13 +158,19 @@ class VocexModel(nn.Module):
         if not self.scalers["mel"].is_fit:
             self.scalers["mel"].partial_fit(mel)
         x = self.scalers["mel"].transform(mel)
-        x = x + (torch.randn_like(x) * x.std() + x.mean()) * self.noise_factor
+        is_onnx = (hasattr(self, "onnx_export") and self.onnx_export)
+        if is_onnx:
+            random_noise = (torch.randn_like(x, dtype=float) * x.std() + x.mean()) * self.noise_factor
+        else:
+            random_noise = (torch.randn_like(x) * x.std() + x.mean()) * self.noise_factor
+        if is_onnx:
+            x_dtype = x.dtype
+            x = x + random_noise
+            x = x.to(x_dtype)
+        else:
+            x = x + random_noise
         out = self.in_layer(x)
-        if self.verbose:
-            print(out.mean(), "1")
         out = self.positional_encoding(out)
-        if self.verbose:
-            print(out.mean(), "2")
         res = self.layers(out, src_key_padding_mask=mel_padding_mask, need_weights=return_attention)
         if return_activations:
             activations = res["activations"]
@@ -175,11 +181,7 @@ class VocexModel(nn.Module):
             out_conv = res["output"]
         if not return_activations and not return_attention:
             out_conv = res
-        if self.verbose:
-            print(out_conv.mean(), "3")
         out = self.linear(out_conv)
-        if self.verbose:
-            print(out.mean(), "4")
         out = out.transpose(1, 2)
 
         measure_results = {}
@@ -240,7 +242,7 @@ class VocexModel(nn.Module):
                 loss /= 2
             else:
                 loss = dvector_loss
-        if not inference:
+        if (not inference) and not (hasattr(self, "onnx_export") and self.onnx_export):
             results = {
                 "loss": loss,
                 "compound_losses": loss_dict,
@@ -260,6 +262,8 @@ class VocexModel(nn.Module):
                 else:
                     measure_results[measure] = torch.sigmoid(measure_results[measure]).detach()
             dvector_pred = self.scalers["dvector"].inverse_transform(dvector_pred)
+            if is_onnx:
+                return [measure_results[measure] for measure in self.measures] + [dvector_pred]
             results = {
                 "loss": loss,
                 "compound_losses": loss_dict,

@@ -96,7 +96,7 @@ class GaussianMinMaxScaler(nn.Module):
         if self.for_tensors:
             X = X.clamp_(min=self.floor)
             if self.sqrt:
-                X = torch.sqrt(X)
+                X = X ** 0.5
             # print if any nan values
             # if torch.isnan(X).any():
             #     print("NAN values in GaussianMinMaxScaler!")

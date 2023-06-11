@@ -4,8 +4,10 @@ import torch
 import torchaudio.transforms as T
 from librosa.filters import mel as librosa_mel
 import numpy as np
+from torch import nn
 
 from .conformer_model import VocexModel
+from .image_helpers import QuantizeToGivenPalette, transformYIQ2RGB
 
 class Vocex():
     """ 
@@ -18,7 +20,7 @@ class Vocex():
         return torch.log(torch.clamp(x, min=clip_val) * C)
 
     @staticmethod
-    def from_pretrained(model_file, compressed=True, **postprocess_kwargs):
+    def from_pretrained(model_file, compressed=True, for_onnx=False, **postprocess_kwargs):
         """ 
         Load a pretrained model from a given .pt file.
         Also accepts huggingface model names.
@@ -32,9 +34,10 @@ class Vocex():
         model_args = checkpoint["model_args"]
         model = VocexModel(**model_args)
         model.load_state_dict(checkpoint["state_dict"])
-        return Vocex(model, **postprocess_kwargs)
+        return Vocex(model, for_onnx, **postprocess_kwargs)
 
     def __init__(self, model, seed=42, **postprocess_kwargs):
+        super().__init__()
         self.model = model
         self.mel_spectrogram = T.Spectrogram(
             n_fft=1024,
@@ -87,7 +90,6 @@ class Vocex():
         # set to eval mode
         self.model.eval()
         self.seed = seed
-                    
 
     def save_checkpoint(self, path, compressed=True):
         """ Save the model to a given path. """
@@ -223,7 +225,6 @@ class Vocex():
             if measure.shape[0] == 1:
                 measure = torch.nn.functional.conv1d(measure, window, padding="same")
             else:
-                # for batch size > 0, we want to apply the convolution to each batch element separately
                 measure = torch.stack([torch.nn.functional.conv1d(m.unsqueeze(0), window, padding="same") for m in measure]).squeeze(1)
             # remove padding
             measure = measure[:, convolution_window_size // 2:-convolution_window_size // 2]
@@ -233,8 +234,10 @@ class Vocex():
         measure = _interpolate(measure, vad)
         return measure
 
-    def __call__(self, audio, sr=22050, return_activations=False, return_attention=False):
+    def forward(self, audio, sr=22050, return_activations=False, return_attention=False, speaker_avatar=False):
         """ Perform inference on given audio. """
+        is_onnx = hasattr(self.model, "onnx_export") and self.model.onnx_export
+
         # preprocess
         mel = self._preprocess(audio, sr)
         # forward pass
@@ -250,34 +253,82 @@ class Vocex():
         if return_attention:
             out["attention"] = torch.stack(out["attention"]).transpose(0, 1).cpu().numpy()
 
-        del out["loss"]
-        del out["compound_losses"]
+        if not is_onnx:
+            del out["loss"]
+            del out["compound_losses"]
 
         # convert to numpy
-        for measure in out["measures"].keys():
-            out[measure] = out["measures"][measure].cpu().numpy()
+        if not is_onnx:
+            for measure in out["measures"].keys():
+                out[measure] = out["measures"][measure].cpu().numpy()
         # do voice activity postprocessing first
         voice_activity = None
-        if "voice_activity_binary" in out:
-            voice_activity_vals = out["voice_activity_binary"]
-            out["voice_activity_binary"] = self.postprocess(voice_activity_vals, None, **self.postprocess_kwargs["voice_activity_binary"])
-            voice_activity = out["voice_activity_binary"]
+        if "voice_activity_binary" in out or (is_onnx and "voice_activity_binary" in self.model.measures):
+            if not is_onnx:
+                voice_activity_vals = out["voice_activity_binary"]
+            else:
+                # use index of voice activity in self.model.measures
+                voice_activity_vals = out[self.model.measures.index("voice_activity_binary")]
+            voice_activity = self.postprocess(voice_activity_vals, None, **self.postprocess_kwargs["voice_activity_binary"])
+            if not is_onnx:
+                out["voice_activity_binary"] = voice_activity
         # do other postprocessing
-        for measure in out["measures"].keys():
+        for measure in self.model.measures:
             if measure != "voice_activity_binary":
-                measure_vals = out["measures"][measure]
-                out[measure] = self.postprocess(measure_vals, voice_activity, **self.postprocess_kwargs[measure])
-        del out["measures"]
-        if "dvector" in out:
+                if not is_onnx:
+                    measure_vals = out["measures"][measure]
+                else:
+                    # use index of measure in self.model.measures
+                    measure_vals = out[self.model.measures.index(measure)]
+                measure_vals = self.postprocess(measure_vals, voice_activity, **self.postprocess_kwargs[measure])
+                if not is_onnx:
+                    out[measure] = measure_vals
+                else:
+                    # use index of measure in self.model.measures
+                    out[self.model.measures.index(measure)] = measure_vals
+        
+        if not is_onnx:
+            del out["measures"]
             out["dvector"] = out["dvector"].cpu().numpy()
-        for measure in out.keys():
-            if isinstance(out[measure], torch.Tensor):
-                out[measure] = out[measure].cpu().numpy()
-        if "snr" in out and "voice_activity_binary" in out:
-            out["overall_snr"] = (out["snr"] * out["voice_activity_binary"]).sum(axis=-1) / out["voice_activity_binary"].sum(axis=-1)
-        if "srmr" in out and "voice_activity_binary" in out:
-            va_mask = out["voice_activity_binary"] > 0.5
-            out["overall_srmr"] = (out["srmr"] * va_mask).sum(axis=-1) / va_mask.sum(axis=-1)
-            if np.isnan(out["overall_srmr"]).any():
-                out["overall_srmr"][np.isnan(out["overall_srmr"])] = out["srmr"][np.isnan(out["overall_srmr"])].mean(axis=-1)
+        if speaker_avatar:
+            from scipy import ndimage
+            import seaborn as sns
+            avatars = []
+            for dvec in out["dvector"]:
+                # convert to 8 x 8 x 2
+                dvec = dvec.reshape(8, 8, 2, 2).mean(axis=-1)
+                # normalize
+                dvec = dvec / 0.1
+                # create 8 x 8 image using the 2 channels as i and q values at y=0.5
+                # for this, we add one channel with .5 values
+                dvec = np.concatenate([np.ones_like(dvec) * 0.5, dvec], axis=-1)
+                dvec = dvec[:, :, [0, 2, 3]]
+                # move to correct range for i (-0.5957, 0.5957)
+                dvec[:, :, 1] = dvec[:, :, 1] * 0.5957
+                # move to correct range for q (-0.5226, 0.5226)
+                dvec[:, :, 2] = dvec[:, :, 2] * 0.5226
+                # convert to rgb
+                dvec = transformYIQ2RGB(dvec)
+                # scale up to 256 x 256
+                dvec = ndimage.zoom(dvec, (32, 32, 1), order=1)
+                # make symmetric
+                dvec = np.concatenate([dvec, dvec[:, ::-1]], axis=1)
+                dvec = np.concatenate([dvec, dvec[::-1]], axis=0)
+                inPalette = np.array(sns.color_palette("hls", 5))
+                dvec = QuantizeToGivenPalette(dvec, inPalette)
+                # add to list
+                avatars.append(dvec)
+            out["avatars"] = np.stack(avatars)
+
+        if not is_onnx:
+            for measure in out.keys():
+                if isinstance(out[measure], torch.Tensor):
+                    out[measure] = out[measure].cpu().numpy()
+            if "snr" in out and "voice_activity_binary" in out:
+                out["overall_snr"] = (out["snr"] * out["voice_activity_binary"]).sum(axis=-1) / out["voice_activity_binary"].sum(axis=-1)
+            if "srmr" in out and "voice_activity_binary" in out:
+                va_mask = out["voice_activity_binary"] > 0.5
+                out["overall_srmr"] = (out["srmr"] * va_mask).sum(axis=-1) / va_mask.sum(axis=-1)
+                if np.isnan(out["overall_srmr"]).any():
+                    out["overall_srmr"][np.isnan(out["overall_srmr"])] = out["srmr"][np.isnan(out["overall_srmr"])].mean(axis=-1)
         return out
