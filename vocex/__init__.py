@@ -8,6 +8,7 @@ from torch import nn
 
 from .conformer_model import VocexModel
 from .image_helpers import QuantizeToGivenPalette, transformYIQ2RGB
+from .onnx_stft import TacotronSTFT
 
 class Vocex():
     """ 
@@ -331,4 +332,95 @@ class Vocex():
                 out["overall_srmr"] = (out["srmr"] * va_mask).sum(axis=-1) / va_mask.sum(axis=-1)
                 if np.isnan(out["overall_srmr"]).any():
                     out["overall_srmr"][np.isnan(out["overall_srmr"])] = out["srmr"][np.isnan(out["overall_srmr"])].mean(axis=-1)
+        return out
+    
+
+class OnnxVocexWrapper(nn.Module):
+    """
+    Same as above, but with one-size-fits-all postprocessing (simple smoothing)
+    """
+    
+    def from_pretrained(model_file, compressed=True):
+        """ 
+        Load a pretrained model from a given .pt file.
+        Also accepts huggingface model names.
+        """
+        if compressed:
+            # decompress
+            with gzip.open(model_file, "rb") as f:
+                checkpoint = torch.load(f)
+        else:
+            checkpoint = torch.load(model_file)
+        model_args = checkpoint["model_args"]
+        model = VocexModel(**model_args)
+        model.load_state_dict(checkpoint["state_dict"])
+        return OnnxVocexWrapper(model)
+    
+    def __init__(self, model):
+        super().__init__()
+        self.model = model
+        self.mel_spectrogram = TacotronSTFT(
+            filter_length=1024,
+            hop_length=256,
+            win_length=1024,
+            n_mel_channels=80,
+            sampling_rate=22050,
+            mel_fmin=0,
+            mel_fmax=8000,
+        )
+        mel_basis = librosa_mel(
+            sr=22050,
+            n_fft=1024,
+            n_mels=80,
+            fmin=0,
+            fmax=8000,
+        )
+        self.mel_basis = torch.from_numpy(mel_basis).float()
+        # set to eval mode
+        self.model.eval()
+        self.model.onnx_export = True
+
+    def _preprocess(self, audio, sr=22050):
+        """ Preprocess audio, we only need to take batch size 1 into account. """
+        # convert to tensor
+        if isinstance(audio, np.ndarray):
+            audio = torch.from_numpy(audio).float()
+        # dtypes
+        if audio.dtype == torch.int16:
+            audio = audio / 32768
+        elif audio.dtype == torch.float64:
+            audio = audio.to(torch.float32)
+        # resample if necessary
+        if sr != 22050:
+            audio = T.Resample(sr, 22050)(audio)
+        audio = audio / audio.abs().max()
+        # make mono if necessary
+        if audio.ndim == 2:
+            audio = audio.mean(dim=-1)
+        # convert to spectrogram
+        mel = self.mel_spectrogram(audio.unsqueeze(0))
+        # convert to mel spectrogram
+        mel = torch.matmul(self.mel_basis, mel)
+        # dynamic range compression
+        mel = Vocex._drc(mel)
+        # transpose
+        if mel.ndim == 2:
+            # add batch dimension if necessary
+            mel = mel.unsqueeze(0)
+        mel = mel.transpose(1, 2)
+        return mel
+    
+    def forward(self, audio, sr=22050):
+        """ Perform inference on given audio. Return list instead of dict. """
+        # preprocess
+        mel = self._preprocess(audio, sr)
+        # forward pass
+        with torch.no_grad():
+            out = self.model(mel, inference=True)
+        # do simple smoothing
+        # for i, measure in enumerate(out):
+        #     if measure.ndim == 1:
+        #         # add batch dimension if necessary
+        #         measure = measure.unsqueeze(0)
+        #     out[i] = torch.nn.functional.avg_pool1d(measure.unsqueeze(1), kernel_size=10, stride=1).squeeze(1)
         return out

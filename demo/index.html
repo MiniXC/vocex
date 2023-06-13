@@ -15,11 +15,10 @@
                     // the model in this example contains a single MatMul node
                     // it has 2 inputs: 'a'(float32, 3x4) and 'b'(float32, 4x3)
                     // it has 1 output: 'c'(float32, 3x3)
-                    const session = await ort.InferenceSession.create('../models/onnx/model.onnx');
+                    const session = await ort.InferenceSession.create('../models/onnx/model.wrapped.onnx');
 
-                    // prepare inputs [1, 512, 80]
-                    const mel = new Float32Array(1 * 512 * 80);
-                    const melTensor = new ort.Tensor('float32', mel, [1, 512, 80]);
+                    const mel = new Float32Array(512 * 256);
+                    const melTensor = new ort.Tensor('float32', mel, [512*256]);
 
                     // prepare feeds. use model input names as keys.
                     const feeds = { mel: melTensor };

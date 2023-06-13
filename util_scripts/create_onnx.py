@@ -8,7 +8,7 @@ import numpy as np
 from onnxruntime.quantization import quantize_dynamic, quantize_static
 from onnxconverter_common import float16
 
-from vocex import Vocex
+from vocex import Vocex, OnnxVocexWrapper
 
 def export_onnx(checkpoint, onnx_path):
     vocex = Vocex.from_pretrained(checkpoint)
@@ -17,6 +17,11 @@ def export_onnx(checkpoint, onnx_path):
 
     dummy_input = torch.randn(1, 512, 80)
     torch.onnx.export(model, dummy_input, onnx_path, verbose=False)
+
+def export_wrapped_onnx(checkpoint, onnx_path):
+    vocex = OnnxVocexWrapper.from_pretrained(checkpoint)
+    dummy_input = torch.randn(512*256)
+    torch.onnx.export(vocex, dummy_input, onnx_path, verbose=False)
 
 def compress_onnx(checkpoint, onnx_path):
     onnx_path = Path(onnx_path)
@@ -82,7 +87,8 @@ def main():
     check_onnxruntime(checkpoint, onnx_path.with_suffix('.float16.onnx'), use_float16=True)
     print("checking int8 onnx")
     check_onnxruntime(checkpoint, onnx_path.with_suffix('.int8.onnx'))
-
+    print("exporting wrapped onnx")
+    export_wrapped_onnx(checkpoint, onnx_path.with_suffix('.wrapped.onnx'))
 
 if __name__ == '__main__':
     main()
