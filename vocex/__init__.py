@@ -147,6 +147,7 @@ class Vocex():
         if audio.ndim == 1:
             # normalize unbatched
             audio = audio / audio.abs().max()
+            audio = audio.unsqueeze(0)
         elif audio.ndim == 2:
             # normalize batched
             audio = audio / audio.abs().max(dim=-1, keepdim=True)[0]
@@ -235,7 +236,7 @@ class Vocex():
         measure = _interpolate(measure, vad)
         return measure
 
-    def forward(self, audio, sr=22050, return_activations=False, return_attention=False, speaker_avatar=False):
+    def __call__(self, audio, sr=22050, return_activations=False, return_attention=False, speaker_avatar=False):
         """ Perform inference on given audio. """
         is_onnx = hasattr(self.model, "onnx_export") and self.model.onnx_export
 
@@ -261,18 +262,18 @@ class Vocex():
         # convert to numpy
         if not is_onnx:
             for measure in out["measures"].keys():
-                out[measure] = out["measures"][measure].cpu().numpy()
+                out["measures"][measure] = out["measures"][measure].cpu().numpy()
         # do voice activity postprocessing first
         voice_activity = None
-        if "voice_activity_binary" in out or (is_onnx and "voice_activity_binary" in self.model.measures):
+        if "voice_activity_binary" in out["measures"] or (is_onnx and "voice_activity_binary" in self.model.measures):
             if not is_onnx:
-                voice_activity_vals = out["voice_activity_binary"]
+                voice_activity_vals = out["measures"]["voice_activity_binary"]
             else:
                 # use index of voice activity in self.model.measures
                 voice_activity_vals = out[self.model.measures.index("voice_activity_binary")]
             voice_activity = self.postprocess(voice_activity_vals, None, **self.postprocess_kwargs["voice_activity_binary"])
             if not is_onnx:
-                out["voice_activity_binary"] = voice_activity
+                out["measures"]["voice_activity_binary"] = voice_activity
         # do other postprocessing
         for measure in self.model.measures:
             if measure != "voice_activity_binary":
@@ -283,13 +284,12 @@ class Vocex():
                     measure_vals = out[self.model.measures.index(measure)]
                 measure_vals = self.postprocess(measure_vals, voice_activity, **self.postprocess_kwargs[measure])
                 if not is_onnx:
-                    out[measure] = measure_vals
+                    out["measures"][measure] = measure_vals
                 else:
                     # use index of measure in self.model.measures
                     out[self.model.measures.index(measure)] = measure_vals
         
         if not is_onnx:
-            del out["measures"]
             out["dvector"] = out["dvector"].cpu().numpy()
         if speaker_avatar:
             from scipy import ndimage
@@ -325,13 +325,17 @@ class Vocex():
             for measure in out.keys():
                 if isinstance(out[measure], torch.Tensor):
                     out[measure] = out[measure].cpu().numpy()
-            if "snr" in out and "voice_activity_binary" in out:
-                out["overall_snr"] = (out["snr"] * out["voice_activity_binary"]).sum(axis=-1) / out["voice_activity_binary"].sum(axis=-1)
-            if "srmr" in out and "voice_activity_binary" in out:
-                va_mask = out["voice_activity_binary"] > 0.5
-                out["overall_srmr"] = (out["srmr"] * va_mask).sum(axis=-1) / va_mask.sum(axis=-1)
+            if "snr" in out["measures"] and "voice_activity_binary" in out["measures"]:
+                out["overall_snr"] = (out["measures"]["snr"] * out["measures"]["voice_activity_binary"]).sum(axis=-1) / out["measures"]["voice_activity_binary"].sum(axis=-1)
+            if "srmr" in out["measures"] and "voice_activity_binary" in out["measures"]:
+                va_mask = out["measures"]["voice_activity_binary"] > 0.5
+                out["overall_srmr"] = (out["measures"]["srmr"] * va_mask).sum(axis=-1) / va_mask.sum(axis=-1)
                 if np.isnan(out["overall_srmr"]).any():
-                    out["overall_srmr"][np.isnan(out["overall_srmr"])] = out["srmr"][np.isnan(out["overall_srmr"])].mean(axis=-1)
+                    out["overall_srmr"][np.isnan(out["overall_srmr"])] = out["measures"]["srmr"][np.isnan(out["overall_srmr"])].mean(axis=-1)
+            if "pitch" in out["measures"] and "voice_activity_binary" in out["measures"]:
+                out["overall_pitch"] = (out["measures"]["pitch"] * out["measures"]["voice_activity_binary"]).sum(axis=-1) / out["measures"]["voice_activity_binary"].sum(axis=-1)
+            if "energy" in out["measures"] and "voice_activity_binary" in out["measures"]:
+                out["overall_energy"] = (out["measures"]["energy"] * out["measures"]["voice_activity_binary"]).sum(axis=-1) / out["measures"]["voice_activity_binary"].sum(axis=-1)
         return out
     
 
