@@ -1,5 +1,10 @@
 # Vocex
 
+## What does it do?
+Vocex extracts several sequence level measures from audio using a small neural network. It also extracts d-vectors, which are a 256 dimensional representation of the speaker's voice. It can also be used to extract speaker avatars, which are a 2D representation of the speaker's voice (derived from the d-vector).
+
+![summary_image](demo/summary.png)
+
 ## Installation
 
 ```pip install vocex```
@@ -37,3 +42,12 @@ attention = outputs["attention"] # a list of torch tensors with shape [batch_siz
 outputs = model(audio, sample_rate, return_avatar=True)
 avatar = outputs["avatars"] # a torch tensor with shape [batch_size, 256, 256]
 ```
+
+## How was it trained?
+
+Vocex is essentially as student model trained on both algorithmic and learned speech methods which extract attributes from speech. They are:
+- pitch using [pyworld](https://github.com/JeremyCCHsu/Python-Wrapper-for-World-Vocoder)
+- energy using some simple heuristics
+- snr using [wada snr](https://gist.github.com/johnmeade/d8d2c67b87cda95cd253f55c21387e75)
+- srmr using [srmrpy](https://github.com/jfsantos/SRMRpy)
+- dvectors using [ge2e](https://github.com/yistLin/dvector)
