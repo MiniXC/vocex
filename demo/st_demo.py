@@ -50,6 +50,8 @@ with st.sidebar:
         with st.spinner('Loading model...'):
             st.session_state['model'] = Vocex.from_pretrained(checkpoint)
             model = st.session_state['model']
+    else:
+        model = st.session_state['model']
 
     cmap = st.selectbox('Spectrogram Color Map', ['magma', 'viridis', 'plasma', 'inferno', 'gray'], index=4)
 
