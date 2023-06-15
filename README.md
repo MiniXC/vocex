@@ -55,4 +55,4 @@ Vocex is essentially as student model trained on both algorithmic and learned sp
 - dvectors using [ge2e](https://github.com/yistLin/dvector)
 
 ## Demo
-There is also a demo available at [vocex.cdminix.me](https://vocex.cdminix.me)
+There is also a demo available at [vocex.cdminix.me](https://cdminix.me/vocex)
