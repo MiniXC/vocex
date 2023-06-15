@@ -53,3 +53,6 @@ Vocex is essentially as student model trained on both algorithmic and learned sp
 - snr using [wada snr](https://gist.github.com/johnmeade/d8d2c67b87cda95cd253f55c21387e75)
 - srmr using [srmrpy](https://github.com/jfsantos/SRMRpy)
 - dvectors using [ge2e](https://github.com/yistLin/dvector)
+
+## Demo
+There is also a demo available at [vocex.cdminix.me](https://vocex.cdminix.me)
