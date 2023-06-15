@@ -13,7 +13,9 @@ import torchaudio
 from scipy.io.wavfile import write
 import pandas as pd
 
-# upload audio file
+# set page title
+st.set_page_config(page_title='Vocex Demo', page_icon='🎤')
+
 st.title('Vocex Demo')
 
 audio_data = None
@@ -34,24 +36,22 @@ def clear_audio():
     sample_rate = None
 
 with st.sidebar:
-    precision = st.radio('Model Precision', ['FP32', 'FP16'], index=0)
+    checkpoint = st.selectbox('Model Checkpoint', ['cdminix/vocex', 'models/checkpoint_full.ckpt', 'models/checkpoint_half.ckpt'], index=0)
 
-    if precision == 'FP32':
-        checkpoint = 'models/checkpoint_full.ckpt'
-    else:
-        checkpoint = 'models/checkpoint_half.ckpt'
-
+    if 'checkpoint' in st.session_state and st.session_state['checkpoint'] != checkpoint:
+        clear_audio()
+        st.session_state['checkpoint'] = checkpoint
+        st.session_state['model'] = None
+    
     st.session_state['checkpoint'] = checkpoint
 
     # load model
-    with st.spinner('Loading model...'):
-        if 'checkpoint' not in st.session_state:
-            st.session_state['checkpoint'] = 'models/checkpoint_full.ckpt'
-        checkpoint = st.session_state['checkpoint']
-        # load using Vocex.from_pretrained, put in session state
-        if 'model' not in st.session_state:
+    if 'model' not in st.session_state:
+        with st.spinner('Loading model...'):
             st.session_state['model'] = Vocex.from_pretrained(checkpoint)
-        model = st.session_state['model']
+            model = st.session_state['model']
+
+    cmap = st.selectbox('Spectrogram Color Map', ['magma', 'viridis', 'plasma', 'inferno', 'gray'], index=4)
 
 with st.expander('Select Audio Data'):
 
@@ -129,17 +129,40 @@ if audio_data_arr is not None:
                     st.session_state['measures'] = list(output["measures"].keys())
             output = st.session_state['output']
             measure_keys = st.session_state['measures']
-            measure = st.selectbox('Measure', measure_keys, index=1)
-            fig = plt.figure(figsize=(20, 5))
+            all_measures = st.checkbox('Show all measures', value=True, key='show_all_measures')
+            if not all_measures:
+                measure = st.selectbox('Measure', measure_keys, index=1)
+            fig = plt.figure(figsize=(20, 6))
             mel = model._preprocess(audio_data_arr, sample_rate)[0]
-            plt.imshow(mel.T, aspect="auto", origin="lower", cmap="magma", alpha=0.5)
+            plt.imshow(mel.T, aspect="auto", origin="lower", cmap=cmap, alpha=0.5)
             plt.twinx()
-            values = np.array(output["measures"][measure])[0]
-            sns.lineplot(x=range(len(values)), y=values)
-            plt.title(measure)
-            plt.tight_layout()
+            if all_measures:
+                for m in reversed(measure_keys):
+                    if 'voice' not in m:
+                        values = np.array(output["measures"][m])[0]
+                        values = (values - values.min()) / (values.max() - values.min())
+                        # get sns color palette, and make line a bit thicker
+                        palette = sns.color_palette()
+                        measure_index = measure_keys.index(m)
+                        values += measure_index * 1.3
+                        sns.lineplot(x=range(len(values)), y=values, color=palette[measure_index], linewidth=5)
+                        plt.text(-70, measure_index * 1.3 + .5, m, fontsize=40, color=palette[measure_index])
+                        plt.title("all measures")
+                        plt.tight_layout()
+            else:
+                values = np.array(output["measures"][measure])[0]
+                # get sns color palette, and make line a bit thicker
+                palette = sns.color_palette()
+                measure_index = measure_keys.index(measure)
+                sns.lineplot(x=range(len(values)), y=values, color=palette[measure_index], linewidth=5)
+                plt.title(measure)
+                plt.tight_layout()
             plt.xlim(0, len(values))
-            plt.ylim(0, values.max()*1.5)
+            if all_measures:
+                plt.ylim(0, 5)
+            else:
+                val_range = values.max() - values.min()
+                plt.ylim(values.min() - val_range * .1, values.max() + val_range * .1)
             st.pyplot(fig)
             st.subheader('Overall Measures')
             st.table(pd.DataFrame([[np.round(float(output[f'overall_{m}']), 2) for m in measure_keys if m != 'voice_activity_binary']], columns=[m for m in measure_keys if m != 'voice_activity_binary'], index=['value']))

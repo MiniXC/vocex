@@ -5,6 +5,10 @@ import torchaudio.transforms as T
 from librosa.filters import mel as librosa_mel
 import numpy as np
 from torch import nn
+from transformers.utils.hub import cached_file
+from pathlib import Path
+import requests
+import warnings
 
 from .conformer_model import VocexModel
 from .image_helpers import QuantizeToGivenPalette, transformYIQ2RGB
@@ -21,11 +25,34 @@ class Vocex():
         return torch.log(torch.clamp(x, min=clip_val) * C)
 
     @staticmethod
-    def from_pretrained(model_file, compressed=True, for_onnx=False, **postprocess_kwargs):
+    def from_pretrained(model, compressed=True, for_onnx=False, fp16=True, **postprocess_kwargs):
         """ 
         Load a pretrained model from a given .pt file.
         Also accepts huggingface model names.
         """
+        if isinstance(model, str):
+            if Path(model).is_file():
+                model_file = model
+            elif Path(model).is_dir():
+                if fp16:
+                    model_file = Path(model) / "checkpoint_half.ckpt"
+                else:
+                    model_file = Path(model) / "checkpoint_full.ckpt"
+            elif model.startswith("https://") or model.startswith("http://"):
+                # download from given url (github release, but not huggingface model hub)
+                # use requests to download and save to temporary file
+                # we are not using cached_file here, because it does not work with github releases
+                r = requests.get(model)
+                model_file = Path("/tmp") / Path(model).name
+                with open(model_file, "wb") as f:
+                    f.write(r.content)
+            else:
+                # download from huggingface model hub
+                if fp16:
+                    model_file = cached_file(model, "checkpoint_half.ckpt")
+                else:
+                    model_file = cached_file(model, "checkpoint_full.ckpt")
+
         if compressed:
             # decompress
             with gzip.open(model_file, "rb") as f:
@@ -225,7 +252,10 @@ class Vocex():
                 # add batch dimension if necessary
                 measure = measure.unsqueeze(0)
             if measure.shape[0] == 1:
-                measure = torch.nn.functional.conv1d(measure, window, padding="same")
+                with warnings.catch_warnings():
+                    # ignore warning about conv1d being deprecated
+                    warnings.simplefilter("ignore")
+                    measure = torch.nn.functional.conv1d(measure, window, padding="same")
             else:
                 measure = torch.stack([torch.nn.functional.conv1d(m.unsqueeze(0), window, padding="same") for m in measure]).squeeze(1)
             # remove padding
