@@ -32,7 +32,7 @@ importlib-metadata==6.6.0
 importlib-resources==5.12.0
 Jinja2==3.1.2
 joblib==1.2.0
-vocex==0.1.7
+vocex==0.1.8
 jsonschema==4.17.3
 kiwisolver==1.4.4
 lazy_loader==0.2
