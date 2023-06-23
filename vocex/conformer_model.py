@@ -27,11 +27,6 @@ class VocexModel(nn.Module):
         super().__init__()
         self.measures = measures
         self.noise_factor = noise_factor
-        in_channels = in_channels
-        filter_size = filter_size
-        kernel_size = kernel_size
-        dropout = dropout
-        depthwise = depthwise
         num_outputs = len(self.measures)
 
         self.loss_compounds = self.measures + ["dvector"]
@@ -275,3 +270,129 @@ class VocexModel(nn.Module):
             if return_attention:
                 results["attention"] = [a.detach() for a in attention]
             return results
+
+class Vocex2Model(nn.Module):
+    """
+    Version 2 of the model, which is trained using Version 1 as teacher model.
+    We augment the input with various augmentations and train the model to predict
+    the teacher's output on the original input.
+    Due to this, we disregard SNR and SRMR for now.
+    Also, instead of using externally trained d-vectors (or ones from the teacher), we simply use CrossEntropyLoss to predict which
+    speaker the input belongs to, and use the corresponding embedding as a d-vector replacement.
+    """
+
+    def __init__(
+        self,
+        measures=["energy", "pitch", "voice_activity_binary"],
+        in_channels=80,
+        filter_size=256,
+        kernel_size=3,
+        dropout=0.1,
+        depthwise=True,
+        frame_nlayers=4,
+        speaker_emb_dim=256,
+        utt_nlayers=2,
+        num_augmentations=10,
+    ):
+        super().__init__()
+        self.measures = measures
+        in_channels = in_channels
+        num_outputs = len(self.measures)
+
+        self.loss_compounds = self.measures + ["dvector", "augmentations"]
+
+        self.in_layer = nn.Linear(in_channels, filter_size)
+
+        self.positional_encoding = PositionalEncoding(filter_size)
+
+        self.frame_layers = TransformerEncoder(
+            ConformerLayer(
+                filter_size,
+                2,
+                conv_in=filter_size,
+                conv_filter_size=filter_size,
+                conv_kernel=(kernel_size, 1),
+                batch_first=True,
+                dropout=dropout,
+                conv_depthwise=depthwise,
+            ),
+            num_layers=frame_nlayers,
+        )
+
+        self.frame_linear_measures = nn.Sequential(
+            nn.Linear(filter_size, 1024),
+            nn.ReLU(),
+            nn.Linear(1024, 1024),
+            nn.ReLU(),
+            nn.Linear(1024, num_outputs),
+        )
+
+        self.frame_to_utt_hidden = nn.Linear(filter_size, filter_size)
+        self.frame_to_utt_x = nn.Linear(in_channels, filter_size)
+        self.frame_to_utt_concat = nn.Linear(filter_size * 2, filter_size)
+
+        self.utt_layers = TransformerEncoder(
+            ConformerLayer(
+                filter_size,
+                2,
+                conv_in=filter_size,
+                conv_filter_size=filter_size,
+                conv_kernel=(kernel_size, 1),
+                batch_first=True,
+                dropout=dropout,
+                conv_depthwise=depthwise,
+            ),
+            num_layers=utt_nlayers,
+        )
+
+        self.utt_linear_speaker = nn.Sequential(
+            nn.Linear(filter_size, 1024),
+            nn.ReLU(),
+            nn.Linear(1024, 1024),
+            nn.ReLU(),
+            nn.Linear(1024, speaker_emb_dim),
+        )
+
+        self.apply(self._init_weights)
+
+        # save hparams
+        self.hparams = {
+            "measures": measures,
+            "in_channels": in_channels,
+            "filter_size": filter_size,
+            "kernel_size": kernel_size,
+            "dropout": dropout,
+            "depthwise": depthwise,
+            "frame_nlayers": frame_nlayers,
+            "speaker_emb_dim": speaker_emb_dim,
+            "utt_nlayers": utt_nlayers,
+            "num_augmentations": num_augmentations,
+        }
+
+    def _init_weights(self, module):
+        if isinstance(module, nn.Linear):
+            module.weight.data.normal_(mean=0.0, std=0.02)
+            if module.bias is not None:
+                module.bias.data.zero_()
+        elif isinstance(module, nn.LayerNorm):
+            module.bias.data.zero_()
+            module.weight.data.fill_(1.0)
+
+    def forward(self, mel):
+        x = self.in_layer(mel)
+        x = self.positional_encoding(x)
+        out_frame_hidden = self.frame_layers(x)
+        measures = self.frame_linear_measures(out_frame_hidden)
+        out_utt_hidden = self.frame_to_utt_hidden(out_frame_hidden)
+        x = self.frame_to_utt_x(mel)
+        # concatenate
+        x = torch.cat([out_utt_hidden, x], dim=-1)
+        x = self.frame_to_utt_concat(x)
+        x = self.utt_layers(x)
+        # predict speaker
+        speaker_emb = self.utt_linear_speaker(torch.mean(x, dim=1))
+        return {
+            "measures": measures,
+            "speaker_emb": speaker_emb,
+        }
+

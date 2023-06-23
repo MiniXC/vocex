@@ -6,7 +6,7 @@ from librosa.filters import mel as librosa_mel
 import numpy as np
 from torch import nn
 
-from .conformer_model import VocexModel
+from .conformer_model import VocexModel, Vocex2Model
 from .image_helpers import QuantizeToGivenPalette, transformYIQ2RGB
 from .onnx_stft import TacotronSTFT
 

@@ -47,3 +47,42 @@ class Args:
     wandb_project: str = "consistency_model"
     wandb_run_name: str = None
     wandb_mode: str = "online"
+
+@dataclass
+class Vocex2Args:
+    # data loading
+    dataset: str = "cdminix/libritts-r-aligned"
+    train_split: str = "train"
+    eval_split: str = "dev"
+    speaker2idx: str = "training/data/speaker2idx.json"
+    phone2idx: str = "training/data/phone2idx.json"
+    num_workers: int = 96
+    prefetch_factor: int = 2
+    # no scaler fitting
+    # model layers are now split into "frame" and "utterance" layers
+    frame_nlayers: int = 4
+    utt_nlayers: int = 2
+    depthwise: bool = True
+    # noise factor is removed
+    filter_size: int = 256
+    kernel_size: int = 3
+    dropout: float = 0.1
+    # training
+    pretrained_vocex: str = "cdminix/vocex"
+    measures: str = "energy,pitch,voice_activity_binary"
+    max_epochs: int = 20
+    learning_rate: float = 1e-4
+    warmup_steps: int = 1000
+    weight_decay: float = 0.01
+    log_every: int = 500
+    eval_every: int = 5000
+    save_every: int = 5000
+    checkpoint_dir: str = "checkpoints"
+    batch_size: int = 64
+    gradient_sync_every: int = 100
+    max_grad_norm: float = 2.0
+    # no softdtw
+    # wandb
+    wandb_project: str = "vocex2"
+    wandb_run_name: str = None
+    wandb_mode: str = "offline"
