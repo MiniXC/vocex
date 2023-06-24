@@ -17,15 +17,17 @@ import numpy as np
 from collections import deque
 from transformers import get_linear_schedule_with_warmup
 from copy import deepcopy
+#import torch_xla.debug.profiler as xp
 
 from vocex import Vocex, Vocex2Model
 from training.arguments import Vocex2Args
+from vocex.speaker_loss import SpeakerLoss
 
 def wave_augmentation_func(wave):
-    pass
+    return wave
 
 def mel_augmentation_func(mel):
-    pass
+    return mel
 
 def main():
     parser = HfArgumentParser([Vocex2Args])
@@ -37,14 +39,16 @@ def main():
         
     args.measures = args.measures.split(",")
 
-    wandb.init(
-        name=args.wandb_run_name,
-        project=args.wandb_project,
-        mode=args.wandb_mode,
-    )
-    wandb.config.update(args)
+    # os.environ["ACCELERATE_DOWNCAST_BF16"] = True
+    accelerator = Accelerator(split_batches=True)
 
-    accelerator = Accelerator()
+    if accelerator.is_main_process:
+        wandb.init(
+            name=args.wandb_run_name,
+            project=args.wandb_project,
+            mode=args.wandb_mode,
+        )
+        wandb.config.update(args)
 
     with accelerator.main_process_first():
         libritts = load_dataset(args.dataset)
@@ -68,13 +72,15 @@ def main():
         mel_augmentation_func=mel_augmentation_func,
     )
 
+    vocex_model = Vocex.from_pretrained(args.pretrained_vocex).model
+
+
     train_dl = DataLoader(
         train_ds,
         batch_size=args.batch_size,
         shuffle=True,
         collate_fn=collator.collate_fn,
         num_workers=args.num_workers,
-        pin_memory=True,
     )
 
     eval_dl = DataLoader(
@@ -82,13 +88,7 @@ def main():
         batch_size=args.batch_size,
         shuffle=False,
         collate_fn=collator.collate_fn,
-        num_workers=args.num_workers,
-        pin_memory=True,
     )
-
-    vocex_model = Vocex.from_pretrained(args.pretrained_vocex).model
-
-    target_measures = args.measures.split(",")
 
     model = Vocex2Model(
         frame_nlayers=args.frame_nlayers,
@@ -97,7 +97,10 @@ def main():
         filter_size=args.filter_size,
         kernel_size=args.kernel_size,
         dropout=args.dropout,
+        speaker_emb_dim=args.speaker_embedding_size,
     )
+
+    print("Model parameters (M):", sum(p.numel() for p in model.parameters()) / 1_000_000)
 
     optimizer = torch.optim.AdamW(
         model.parameters(),
@@ -108,7 +111,7 @@ def main():
     )
 
     num_epochs = args.max_epochs
-    num_training_steps = num_epochs * len(train_dataloader)
+    num_training_steps = num_epochs * len(train_dl)
 
     lr_scheduler = get_linear_schedule_with_warmup(
         optimizer=optimizer,
@@ -116,10 +119,12 @@ def main():
         num_training_steps=num_training_steps,
     )
 
-    progress_bar = tqdm(range(num_training_steps), desc="training", disable=not accelerator.is_local_main_process)
+    if accelerator.is_main_process:
+        progress_bar = tqdm(range(num_training_steps), desc=f"training (rank {accelerator.process_index}, device {accelerator.device})")
 
-    train_dataloader, eval_dataloader, model, optimizer, lr_scheduler, vocex_model = accelerator.prepare(
-        train_dataloader, eval_dataloader, model, optimizer, lr_scheduler, vocex_model
+
+    train_dl, eval_dl, model, optimizer, lr_scheduler, vocex_model = accelerator.prepare(
+        train_dl, eval_dl, model, optimizer, lr_scheduler, vocex_model
     )
 
     model.train()
@@ -127,66 +132,95 @@ def main():
     step = 0
 
     # categorical cross entropy for speaker classification
-    speaker_loss = torch.nn.CrossEntropyLoss()
+    speaker_loss = SpeakerLoss(
+        hidden_size=args.speaker_embedding_size,
+        num_speakers=len(speaker2idx),
+    )
+    speaker_loss = accelerator.prepare(speaker_loss)
     # mean squared error for measures
     measure_loss = torch.nn.MSELoss()
 
-    overall_losses = deque(maxlen=100)
-    speaker_losses = deque(maxlen=100)
-    measure_losses = {
-        m: deque(maxlen=100)
-        for m in target_measures
-    }
+    if accelerator.is_main_process:
+        overall_losses = deque(maxlen=100)
+        speaker_losses = deque(maxlen=100)
+        measure_losses = {
+            m: deque(maxlen=100)
+            for m in args.measures
+        }
     
     for epoch in range(num_epochs):
-        for batch in train_dataloader:
-            vocex_outputs = vocex_model(
-                mel=batch["mel"].to(accelerator.device),
-                inference=True,
-            )
-            measures = {
-                m: vocex_outputs["measures"][m]
-                for m in target_measures
-            }
-            speaker = batch["speaker"].to(accelerator.device)
-            augmented_mel = batch["augmented_mel"].to(accelerator.device)
-
-            outputs = model(
-                mel=augmented_mel,
-            )
-
-            speaker_loss_val = speaker_loss(
-                outputs["speaker_logits"],
-                speaker,
-            )
-
-            measure_loss_val = {
-                m: measure_loss(
-                    outputs["measures"][m],
-                    measures[m],
+        for batch in train_dl:
+            measures = None
+            with torch.no_grad():
+                vocex_outputs = vocex_model(
+                    mel=batch["mel"],
+                    inference=True,
                 )
-                for m in target_measures
-            }
+                measures = {
+                    m: vocex_model.scalers[m].transform(vocex_outputs["measures"][m])
+                    if m != "voice_activity_binary"
+                    else vocex_outputs["measures"][m]
+                    for m in args.measures
+                }
+            speaker = batch["speaker"]
+            augmented_mel = batch["augmented_mel"]
+            # measures = batch["measures"]
 
-            loss = (speaker_loss_val + sum(measure_loss_val.values())) / (len(measure_loss_val) + 1)
+            if (step + 1) % args.gradient_sync_every == 0:
+                outputs = model(
+                    mel=augmented_mel,
+                )
+                speaker_loss_val = speaker_loss(
+                    outputs["speaker_embedding"],
+                    speaker,
+                )
+                measure_loss_val = {
+                    m: measure_loss(
+                        outputs["measures"][m],
+                        measures[m],
+                    )
+                    for m in args.measures
+                }
+                loss = (speaker_loss_val + sum(measure_loss_val.values())) / (len(measure_loss_val) + 1)
+                accelerator.backward(loss)
+                optimizer.step()
+                lr_scheduler.step()
+                optimizer.zero_grad()
+            else:
+                with accelerator.no_sync(model):
+                    outputs = model(
+                        mel=augmented_mel,
+                    )
+                    speaker_loss_val = speaker_loss(
+                        outputs["speaker_embedding"],
+                        speaker,
+                    )
+                    measure_loss_val = {
+                        m: measure_loss(
+                            outputs["measures"][m],
+                            measures[m],
+                        )
+                        for m in args.measures
+                    }
+                    loss = (speaker_loss_val + sum(measure_loss_val.values())) / (len(measure_loss_val) + 1)
+                    accelerator.backward(loss)
+                    optimizer.step()
+                    lr_scheduler.step()
+                    optimizer.zero_grad()
 
-            accelerator.backward(loss)
-            optimizer.step()
-            lr_scheduler.step()
-            optimizer.zero_grad()
+            if accelerator.is_main_process:
+                overall_losses.append(loss)
+                speaker_losses.append(speaker_loss_val)
+                for m in args.measures:
+                    measure_losses[m].append(measure_loss_val[m])
 
-            overall_losses.append(loss.item())
-            speaker_losses.append(speaker_loss_val.item())
-            for m in target_measures:
-                measure_losses[m].append(measure_loss_val[m].item())
-
-            if step % args.log_every == 0:
+            if (step + 1) % args.log_every == 0 and accelerator.is_main_process:
                 loss_dict = {
-                    "train/loss": torch.mean(overall_losses).item(),
-                    "train/speaker_loss": torch.mean(speaker_losses).item(),
+                    "train/loss": sum(overall_losses).item() / len(overall_losses),
+                    "train/speaker_loss": sum(speaker_losses).item() / len(speaker_losses),
                     **{
-                        f"train/{m}_loss": torch.mean(measure_losses[m]).item()
-                        for m in target_measures
+                        f"train/{m}_loss": sum(measure_losses[m]).item() / len(measure_losses[m])
+                        for m in args.measures
                     },
                 }
                 wandb.log(loss_dict, step=step)
@@ -196,17 +230,20 @@ def main():
                 })
                 overall_losses.clear()
                 speaker_losses.clear()
-                for m in target_measures:
+                for m in args.measures:
                     measure_losses[m].clear()
                 
-            if step % args.eval_every == 0:
+            if (step + 1) % args.eval_every == 0 and accelerator.is_main_process:
                 pass
 
-            if step % args.save_every == 0:
+            if (step + 1) % args.save_every == 0 and accelerator.is_main_process:
                 pass
 
             step += 1
-            progress_bar.update(1)
+            # update progress bar while using process_index as tqdm desc
+            if accelerator.is_main_process:
+                progress_bar.update(1)
+                progress_bar.set_description(f"training (rank {accelerator.process_index}, device {accelerator.device})")
 
 
 if __name__ == "__main__":

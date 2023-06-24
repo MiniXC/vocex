@@ -18,3 +18,5 @@ setup(
     license="MIT",
 )
 
+# training on tpus seems to be broken on accelerate 0.20+, 0.19.0 works
+

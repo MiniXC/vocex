@@ -6,6 +6,7 @@ from .conformer_layer import ConformerLayer
 from .scaler import GaussianMinMaxScaler
 from .utils import Transpose, NoamLR
 from .softdtw import SoftDTW
+from .pooling import AttentiveStatsPooling
 
 class VocexModel(nn.Module):
 
@@ -145,7 +146,7 @@ class VocexModel(nn.Module):
 
     def forward(self, mel, dvector=None, measures=None, inference=False, return_activations=False, return_attention=False):
         mel_padding_mask = mel.sum(dim=-1) != 0
-        mel_padding_mask = mel_padding_mask.to(torch.float32)
+        mel_padding_mask = mel_padding_mask.to(mel.dtype)
 
         if return_activations:
             self.layers.return_additional_layers = list(range(self.hparams["measure_nlayers"]))
@@ -292,7 +293,6 @@ class Vocex2Model(nn.Module):
         frame_nlayers=4,
         speaker_emb_dim=256,
         utt_nlayers=2,
-        num_augmentations=10,
     ):
         super().__init__()
         self.measures = measures
@@ -345,8 +345,10 @@ class Vocex2Model(nn.Module):
             num_layers=utt_nlayers,
         )
 
+        self.utt_pooling = AttentiveStatsPooling(filter_size, filter_size)
+
         self.utt_linear_speaker = nn.Sequential(
-            nn.Linear(filter_size, 1024),
+            nn.Linear(filter_size * 2, 1024),
             nn.ReLU(),
             nn.Linear(1024, 1024),
             nn.ReLU(),
@@ -366,7 +368,6 @@ class Vocex2Model(nn.Module):
             "frame_nlayers": frame_nlayers,
             "speaker_emb_dim": speaker_emb_dim,
             "utt_nlayers": utt_nlayers,
-            "num_augmentations": num_augmentations,
         }
 
     def _init_weights(self, module):
@@ -379,6 +380,8 @@ class Vocex2Model(nn.Module):
             module.weight.data.fill_(1.0)
 
     def forward(self, mel):
+        mel_padding_mask = mel.sum(dim=-1) != 0
+        mel_padding_mask = mel_padding_mask.to(mel.dtype)
         x = self.in_layer(mel)
         x = self.positional_encoding(x)
         out_frame_hidden = self.frame_layers(x)
@@ -390,9 +393,13 @@ class Vocex2Model(nn.Module):
         x = self.frame_to_utt_concat(x)
         x = self.utt_layers(x)
         # predict speaker
-        speaker_emb = self.utt_linear_speaker(torch.mean(x, dim=1))
+        speaker_emb = self.utt_pooling(x.transpose(1, 2))
+        speaker_emb = self.utt_linear_speaker(speaker_emb)
         return {
-            "measures": measures,
-            "speaker_emb": speaker_emb,
+            "measures": {
+                m: measures[:, :, i] for i, m in enumerate(self.measures)
+            },
+            "speaker_embedding": speaker_emb,
+            "padding_mask": mel_padding_mask,
         }
 
