@@ -22,7 +22,7 @@ class Args:
     dropout: float = 0.1
     # training
     measures: str = "energy,pitch,srmr,snr,voice_activity_binary"
-    max_epochs: int = 20
+    max_epochs: int = 50
     learning_rate: float = 1e-4
     warmup_steps: int = 1000
     weight_decay: float = 0.01
@@ -59,30 +59,30 @@ class Vocex2Args:
     num_workers: int = 16
     # no scaler fitting
     # model layers are now split into "frame" and "utterance" layers
-    frame_nlayers: int = 4
-    utt_nlayers: int = 2
-    depthwise: bool = True
+    nlayers: int = 12
+    depthwise: bool = False
     # noise factor is removed
-    filter_size: int = 256
+    filter_size: int = 512
     kernel_size: int = 3
     dropout: float = 0.1
     speaker_embedding_size: int = 256
     # training
+    bf16: bool = False
     pretrained_vocex: str = "cdminix/vocex"
     measures: str = "energy,pitch,voice_activity_binary"
-    max_epochs: int = 20
+    max_epochs: int = 50
     learning_rate: float = 1e-4
     warmup_steps: int = 1000
     weight_decay: float = 0.01
-    log_every: int = 100
+    log_every: int = 500
     eval_every: int = 500
     save_every: int = 5000
     checkpoint_dir: str = "checkpoints"
-    batch_size: int = 64
+    batch_size: int = 512
     gradient_sync_every: int = 100
     max_grad_norm: float = 2.0
     # no softdtw
     # wandb
     wandb_project: str = "vocex2"
-    wandb_run_name: str = None
-    wandb_mode: str = "offline"
+    wandb_run_name: str = "baseline_no_augmentations_fix"
+    wandb_mode: str = "online"

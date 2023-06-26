@@ -16,18 +16,74 @@ import matplotlib.pyplot as plt
 import numpy as np
 from collections import deque
 from transformers import get_linear_schedule_with_warmup
-from copy import deepcopy
 #import torch_xla.debug.profiler as xp
 
 from vocex import Vocex, Vocex2Model
 from training.arguments import Vocex2Args
 from vocex.speaker_loss import SpeakerLoss
+from .augmentations import wave_augmentation_func, mel_augmentation_func
 
-def wave_augmentation_func(wave):
-    return wave
+def save_model(path, accelerator, model):
+    unwrapped_model = accelerator.unwrap_model(model)
+    accelerator.save(
+        unwrapped_model.state_dict(),
+        path,
+    )
 
-def mel_augmentation_func(mel):
-    return mel
+def eval_model(model, eval_dl, speaker_loss, measure_loss, vocex_model, args):
+    model.eval()
+    loss_dict = {
+        "eval/loss": [],
+        "eval/speaker_loss": [],
+        **{
+            f"eval/{m}_loss": []
+            for m in args.measures
+        },
+    }
+    speaker_preds = []
+    with torch.no_grad():
+        for batch in tqdm(eval_dl, desc="evaluating"):
+            vocex_outputs = vocex_model(
+                mel=batch["mel"],
+                inference=True,
+            )
+            measures = {
+                m: vocex_model.scalers[m].transform(vocex_outputs["measures"][m])
+                if m != "voice_activity_binary"
+                else vocex_outputs["measures"][m]
+                for m in args.measures
+            }
+            speaker = batch["speaker"]
+            augmented_mel = batch["augmented_mel"]
+            outputs = model(
+                mel=augmented_mel,
+            )
+            speaker_loss_val = speaker_loss(
+                outputs["speaker_embedding"],
+                speaker,
+            )
+            measure_loss_val = {
+                m: measure_loss(
+                    outputs["measures"][m],
+                    measures[m],
+                )
+                for m in args.measures
+            }
+            loss = (speaker_loss_val + sum(measure_loss_val.values())) / (len(measure_loss_val) + 1)
+            loss_dict["eval/loss"].append(loss.item())
+            loss_dict["eval/speaker_loss"].append(speaker_loss_val.item())
+            for m in args.measures:
+                loss_dict[f"eval/{m}_loss"].append(measure_loss_val[m].item())
+    model.train()
+    wandb.log({
+        k: np.mean(v)
+        for k, v in loss_dict.items()
+    })
+    print({
+        k: round(np.mean(v), 4)
+        for k, v in loss_dict.items()
+    })
+
 
 def main():
     parser = HfArgumentParser([Vocex2Args])
@@ -39,8 +95,9 @@ def main():
         
     args.measures = args.measures.split(",")
 
-    # os.environ["ACCELERATE_DOWNCAST_BF16"] = True
-    accelerator = Accelerator(split_batches=True)
+    if args.bf16:
+        os.environ["ACCELERATE_DOWNCAST_BF16"] = "true"
+    accelerator = Accelerator(split_batches=True, mixed_precision="bf16" if args.bf16 else None)
 
     if accelerator.is_main_process:
         wandb.init(
@@ -91,8 +148,7 @@ def main():
     )
 
     model = Vocex2Model(
-        frame_nlayers=args.frame_nlayers,
-        utt_nlayers=args.utt_nlayers,
+        nlayers=args.nlayers,
         depthwise=args.depthwise,
         filter_size=args.filter_size,
         kernel_size=args.kernel_size,
@@ -112,6 +168,7 @@ def main():
 
     num_epochs = args.max_epochs
     num_training_steps = num_epochs * len(train_dl)
+    steps_per_epoch = len(train_dl)
 
     lr_scheduler = get_linear_schedule_with_warmup(
         optimizer=optimizer,
@@ -164,7 +221,6 @@ def main():
                 }
             speaker = batch["speaker"]
             augmented_mel = batch["augmented_mel"]
-            # measures = batch["measures"]
 
             if (step + 1) % args.gradient_sync_every == 0:
                 outputs = model(
@@ -222,6 +278,8 @@ def main():
                         f"train/{m}_loss": sum(measure_losses[m]).item() / len(measure_losses[m])
                         for m in args.measures
                     },
+                    "train/epoch": epoch + (step - steps_per_epoch * epoch) / steps_per_epoch,
+                    "train/lr": optimizer.param_groups[0]["lr"],
                 }
                 wandb.log(loss_dict, step=step)
                 print({
@@ -234,10 +292,16 @@ def main():
                     measure_losses[m].clear()
                 
             if (step + 1) % args.eval_every == 0 and accelerator.is_main_process:
-                pass
+                eval_model(model, eval_dl, speaker_loss, measure_loss, vocex_model, args)
 
-            if (step + 1) % args.save_every == 0 and accelerator.is_main_process:
-                pass
+            if (step + 1) % args.save_every == 0:
+                if not os.path.exists(args.checkpoint_dir):
+                    os.makedirs(args.checkpoint_dir)
+                save_model(
+                    os.path.join(args.checkpoint_dir, f"vx2-model-{step+1}.pt"),
+                    accelerator,
+                    model,
+                )
 
             step += 1
             # update progress bar while using process_index as tqdm desc

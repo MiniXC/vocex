@@ -31,6 +31,7 @@ class AttentiveStatsPooling(nn.Module):
         T: maximum number of time steps (frames)
         DE: encoding output size
         """
+        encodings = encodings.transpose(1, 2)
         # Compute a scalar score for each frame-level feature
         # [B, DE, T] -> [B, DE, T]
         energies = self.out_linear(

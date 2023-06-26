@@ -290,9 +290,8 @@ class Vocex2Model(nn.Module):
         kernel_size=3,
         dropout=0.1,
         depthwise=True,
-        frame_nlayers=4,
+        nlayers=4,
         speaker_emb_dim=256,
-        utt_nlayers=2,
     ):
         super().__init__()
         self.measures = measures
@@ -305,7 +304,7 @@ class Vocex2Model(nn.Module):
 
         self.positional_encoding = PositionalEncoding(filter_size)
 
-        self.frame_layers = TransformerEncoder(
+        self.transformer = TransformerEncoder(
             ConformerLayer(
                 filter_size,
                 2,
@@ -316,43 +315,17 @@ class Vocex2Model(nn.Module):
                 dropout=dropout,
                 conv_depthwise=depthwise,
             ),
-            num_layers=frame_nlayers,
+            num_layers=nlayers,
         )
 
-        self.frame_linear_measures = nn.Sequential(
-            nn.Linear(filter_size, 1024),
-            nn.ReLU(),
-            nn.Linear(1024, 1024),
-            nn.ReLU(),
-            nn.Linear(1024, num_outputs),
-        )
+        self.measure_output_layer = nn.Linear(filter_size, num_outputs)
 
-        self.frame_to_utt_hidden = nn.Linear(filter_size, filter_size)
-        self.frame_to_utt_x = nn.Linear(in_channels, filter_size)
-        self.frame_to_utt_concat = nn.Linear(filter_size * 2, filter_size)
-
-        self.utt_layers = TransformerEncoder(
-            ConformerLayer(
-                filter_size,
-                2,
-                conv_in=filter_size,
-                conv_filter_size=filter_size,
-                conv_kernel=(kernel_size, 1),
-                batch_first=True,
-                dropout=dropout,
-                conv_depthwise=depthwise,
-            ),
-            num_layers=utt_nlayers,
-        )
-
-        self.utt_pooling = AttentiveStatsPooling(filter_size, filter_size)
-
-        self.utt_linear_speaker = nn.Sequential(
-            nn.Linear(filter_size * 2, 1024),
-            nn.ReLU(),
-            nn.Linear(1024, 1024),
-            nn.ReLU(),
-            nn.Linear(1024, speaker_emb_dim),
+        self.speaker_output_layer = nn.Sequential(
+            nn.Linear(filter_size, speaker_emb_dim),
+            AttentiveStatsPooling(speaker_emb_dim, filter_size),
+            nn.BatchNorm1d(speaker_emb_dim * 2),
+            nn.Linear(speaker_emb_dim * 2, speaker_emb_dim),
+            nn.BatchNorm1d(speaker_emb_dim),
         )
 
         self.apply(self._init_weights)
@@ -365,9 +338,8 @@ class Vocex2Model(nn.Module):
             "kernel_size": kernel_size,
             "dropout": dropout,
             "depthwise": depthwise,
-            "frame_nlayers": frame_nlayers,
+            "nlayers": nlayers,
             "speaker_emb_dim": speaker_emb_dim,
-            "utt_nlayers": utt_nlayers,
         }
 
     def _init_weights(self, module):
@@ -384,17 +356,9 @@ class Vocex2Model(nn.Module):
         mel_padding_mask = mel_padding_mask.to(mel.dtype)
         x = self.in_layer(mel)
         x = self.positional_encoding(x)
-        out_frame_hidden = self.frame_layers(x)
-        measures = self.frame_linear_measures(out_frame_hidden)
-        out_utt_hidden = self.frame_to_utt_hidden(out_frame_hidden)
-        x = self.frame_to_utt_x(mel)
-        # concatenate
-        x = torch.cat([out_utt_hidden, x], dim=-1)
-        x = self.frame_to_utt_concat(x)
-        x = self.utt_layers(x)
-        # predict speaker
-        speaker_emb = self.utt_pooling(x.transpose(1, 2))
-        speaker_emb = self.utt_linear_speaker(speaker_emb)
+        x = self.transformer(x, src_key_padding_mask=mel_padding_mask)
+        measures = self.measure_output_layer(x)
+        speaker_emb = self.speaker_output_layer(x)
         return {
             "measures": {
                 m: measures[:, :, i] for i, m in enumerate(self.measures)
