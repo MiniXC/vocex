@@ -31,7 +31,7 @@ def save_model(path, accelerator, model):
         path,
     )
 
-def eval_model(model, eval_dl, speaker_loss, measure_loss, vocex_model, args):
+def eval_model(model, eval_dl, speaker_loss, measure_loss, vocex_model, args, accelerator):
     model.eval()
     loss_dict = {
         "eval/loss": [],
@@ -56,8 +56,8 @@ def eval_model(model, eval_dl, speaker_loss, measure_loss, vocex_model, args):
                 for m in args.measures
             }
             speaker = batch["speaker"]
-            speaker_true += speaker.tolist()
-            augmented_mel = batch["augmented_mel"]
+            speaker_true += [s for s in speaker]
+            augmented_mel = batch["mel"] # TODO: add augmentation and no augmentation evaluation
             outputs = model(
                 mel=augmented_mel,
             )
@@ -66,7 +66,7 @@ def eval_model(model, eval_dl, speaker_loss, measure_loss, vocex_model, args):
                 speaker,
                 return_pred=True,
             )
-            speaker_preds += speaker_pred.argmax(dim=-1).tolist()
+            speaker_preds += [s for s in speaker_pred.argmax(dim=-1)]
             measure_loss_val = {
                 m: measure_loss(
                     outputs["measures"][m],
@@ -75,34 +75,50 @@ def eval_model(model, eval_dl, speaker_loss, measure_loss, vocex_model, args):
                 for m in args.measures
             }
             loss = (speaker_loss_val + sum(measure_loss_val.values())) / (len(measure_loss_val) + 1)
-            loss_dict["eval/loss"].append(loss.item())
-            loss_dict["eval/speaker_loss"].append(speaker_loss_val.item())
+            loss_dict["eval/loss"].append(loss)
+            loss_dict["eval/speaker_loss"].append(speaker_loss_val)
             for m in args.measures:
-                loss_dict[f"eval/{m}_loss"].append(measure_loss_val[m].item())
-    accuracy = accuracy_score(speaker_true, speaker_preds)
-    f1 = f1_score(speaker_true, speaker_preds, average="macro")
-    cm = confusion_matrix(speaker_true, speaker_preds)
-    fig = plt.figure(figsize=(16, 16))
-    sns.heatmap(cm, annot=True, fmt="d", cmap="Blues")
-    wandb.log({
-        "eval/speaker_accuracy": accuracy,
-        "eval/speaker_f1": f1,
-        "eval/speaker_confusion": wandb.Image(fig),
-    })
-    plt.close(fig)
-    print({
-        "eval/speaker_accuracy": np.round(accuracy, 4),
-        "eval/speaker_f1": np.round(f1, 4),
-    })
+                loss_dict[f"eval/{m}_loss"].append(measure_loss_val[m])
+    # use gather_for_metrics to get all speaker predictions and losses
+    loss_dict = {
+        k: torch.mean(torch.tensor(v))
+        for k, v in loss_dict.items()
+    }
+    loss_dict_gathered = {
+        k: torch.mean(accelerator.gather_for_metrics(v)).item()
+        for k, v in loss_dict.items()
+    }
+    loss_dict = loss_dict_gathered
+    speaker_true = accelerator.gather_for_metrics(speaker_true)
+    speaker_preds = accelerator.gather_for_metrics(speaker_preds)
+    # flatten speaker_true and speaker_preds
+    if accelerator.is_main_process:
+        speaker_true = torch.cat(speaker_true).cpu().numpy()
+        speaker_preds = torch.cat(speaker_preds).cpu().numpy()
+        accuracy = accuracy_score(speaker_true, speaker_preds)
+        f1 = f1_score(speaker_true, speaker_preds, average="macro")
+        print(len(speaker_true), len(set(speaker_true)), np.max(speaker_true), "speaker_true")
+        print()
+        cm = confusion_matrix(speaker_true, speaker_preds)
+        cm = cm.astype("float") / (cm.sum(axis=1)[:, np.newaxis] + 1e-8)
+        fig = plt.figure(figsize=(16, 16))
+        plt.imshow(cm, cmap="Blues")
+        wandb.log({
+            "eval/speaker_accuracy": accuracy,
+            "eval/speaker_f1": f1,
+            "eval/speaker_confusion": wandb.Image(fig),
+        })
+        plt.close(fig)
+        print({
+            "eval/speaker_accuracy": np.round(accuracy, 4),
+            "eval/speaker_f1": np.round(f1, 4),
+        })
+        wandb.log(loss_dict)
+        print({
+            k: round(v, 4)
+            for k, v in loss_dict.items()
+        })
     model.train()
-    wandb.log({
-        k: np.mean(v)
-        for k, v in loss_dict.items()
-    })
-    print({
-        k: round(np.mean(v), 4)
-        for k, v in loss_dict.items()
-    })
 
 
 def main():
@@ -133,8 +149,13 @@ def main():
     train_ds = libritts[args.train_split].shuffle(seed=42)
     eval_ds = libritts[args.eval_split]
 
-    speaker2idx = json.load(open(args.speaker2idx))
     phone2idx = json.load(open(args.phone2idx))
+
+    # create speaker2idx
+    speaker2idx = {}
+    speakers = set(train_ds["speaker"])
+    for i, speaker in enumerate(sorted([int(x) for x in list(speakers)])):
+        speaker2idx[str(speaker)] = i
 
     collator = SpeechCollator(
         speaker2idx=speaker2idx,
@@ -147,6 +168,16 @@ def main():
         overwrite_max_length=True,
         wave_augmentation_func=wave_augmentation_func,
         mel_augmentation_func=mel_augmentation_func,
+    )
+
+    valid_collator = SpeechCollator(
+        speaker2idx=speaker2idx,
+        phone2idx=phone2idx,
+        return_keys=[
+            "mel",
+            "speaker",
+        ],
+        overwrite_max_length=True,
     )
 
     vocex_model = Vocex.from_pretrained(args.pretrained_vocex).model
@@ -165,7 +196,8 @@ def main():
         eval_ds,
         batch_size=args.batch_size,
         shuffle=False,
-        collate_fn=collator.collate_fn,
+        collate_fn=valid_collator.collate_fn,
+        drop_last=False,
     )
 
     model = Vocex2Model(
@@ -317,8 +349,8 @@ def main():
                 for m in args.measures:
                     measure_losses[m].clear()
                 
-            if (step + 1) % args.eval_every == 0 and accelerator.is_main_process:
-                eval_model(model, eval_dl, speaker_loss, measure_loss, vocex_model, args)
+            if (step + 1) % args.eval_every == 0:
+                eval_model(model, eval_dl, speaker_loss, measure_loss, vocex_model, args, accelerator)
 
             if (step + 1) % args.save_every == 0:
                 if not os.path.exists(args.checkpoint_dir):

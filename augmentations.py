@@ -16,10 +16,29 @@ from pathlib import Path
 import os
 import warnings
 import tempfile
+import signal
+import librosa
 
 aug_polarity_inversion = PolarityInversion(p=1.0)
 
 SAMPLE_RATE = 22050
+
+class Timeout:
+    def __init__(self, timeout_duration, timeout_callback):
+        self.timeout_duration = timeout_duration
+        self.timeout_callback = timeout_callback
+
+    def handle_timeout(self, signum, frame):
+        self.timeout_callback()
+
+    def __enter__(self):
+        signal.signal(signal.SIGALRM, self.handle_timeout)
+        signal.alarm(self.timeout_duration)
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        signal.alarm(0)
+        if exc_type == TimeoutError:
+            return True 
 
 def _random_flag(prob):
     return np.random.uniform(0, 1) < prob
@@ -31,13 +50,14 @@ def resample(signal):
     target_sampling_rate = random.choices(
         [8000, 16000, 44100], [0.4, 0.4, 0.1]
     )[0]
-    resample_algorithm = random.choices(["sinc_interpolation", "kaiser_window"])[0]
-    signal = torch.tensor(signal).unsqueeze(0)
-    if signal.dtype == torch.float64:
-        signal = signal.float()
-    signal = torchaudio.transforms.Resample(SAMPLE_RATE, target_sampling_rate, resample_algorithm)(signal)
-    signal = torchaudio.transforms.Resample(target_sampling_rate, SAMPLE_RATE, resample_algorithm)(signal)
-    signal = signal.squeeze(0).numpy()
+    resample_algorithm = random.choices(
+        ["soxr_vhq", "soxr_hq", "soxr_mq", "soxr_lq", "soxr_qq", "kaiser_best", "kaiser_fast", "fft"],
+        [0.1, 0.1, 0.1, 0.1, 0.1, 0.2, 0.2, 0.1]
+    )[0]
+    if signal.dtype == np.float64:
+        signal = signal.astype(np.float32)
+    signal = librosa.resample(signal, SAMPLE_RATE, target_sampling_rate, res_type=resample_algorithm)
+    signal = librosa.resample(signal, target_sampling_rate, SAMPLE_RATE, res_type=resample_algorithm)
     return signal, f"resample_{target_sampling_rate//1000}k_{resample_algorithm}"
 
 def combine_signal_and_noise(signal, noise, desired_snr):
@@ -137,7 +157,10 @@ def add_reverberation(signal):
         "large_absorbent",
         "large_reflective",
     ], [0.2, 0.2, 0.2, 0.2, 0.15, 0.05])[0]
-    return reverb_rooms[room](samples=signal, sample_rate=SAMPLE_RATE), f"reverb_{room}"
+    try:
+        return reverb_rooms[room](samples=signal, sample_rate=SAMPLE_RATE), f"reverb_{room}"
+    except:
+        return signal, "reverb_none"
 
 def aug_add_colored_noise(wave, _):
     if _random_flag(0.5):
@@ -177,19 +200,17 @@ def add_codecs(wave):
     bitrate = random.choices([16, 32, 64, 128, 320], [0.2, 0.2, 0.2, 0.2, 0.2])[0]
     if not Path("/tmp/codecs").exists():
         Path("/tmp/codecs").mkdir()
-    tmp_file = tempfile.mktemp(dir="/tmp/codecs", suffix=".wav")
-    if wave.dtype == np.float64:
-        wave = wave.astype(np.float32)
-    torchaudio.save(tmp_file, torch.tensor(wave).unsqueeze(0), SAMPLE_RATE)
-    # remove bitrate if not applicable
-    if codec in ["adts", "ogg"]:
-        bitrate = None
-    else:
-        bitrate = f"{bitrate}k"
-    pydub.AudioSegment.from_wav(tmp_file).export(tmp_file, format=codec, bitrate=bitrate)
-    new_wave = np.array(pydub.AudioSegment.from_file(tmp_file).get_array_of_samples())
-    # remove wav file
-    os.remove(tmp_file)
+    with tempfile.NamedTemporaryFile(dir="/tmp/codecs", suffix=".wav") as tmp_file:
+        if wave.dtype == np.float64:
+            wave = wave.astype(np.float32)
+        torchaudio.save(tmp_file, torch.tensor(wave).unsqueeze(0), SAMPLE_RATE, format="wav")
+        # remove bitrate if not applicable
+        if codec in ["adts", "ogg"]:
+            bitrate = None
+        else:
+            bitrate = f"{bitrate}k"
+        pydub.AudioSegment.from_wav(tmp_file).export(tmp_file, format=codec, bitrate=bitrate)
+        new_wave = np.array(pydub.AudioSegment.from_file(tmp_file).get_array_of_samples())
     if new_wave.shape != wave.shape:
         # interpolate
         new_wave = np.interp(
@@ -202,68 +223,71 @@ def add_codecs(wave):
         return new_wave, f"codec_{codec}_{bitrate}"
     return new_wave, f"codec_{codec}"
 
+def timeout_message():
+    global augmentations
+    print(f"Timeout! Augmentations: {'|'.join(augmentations)}")
+
 def wave_augmentation_func(wave, return_name=False):
+    global augmentations
     old_shape = wave.shape
     augmentations = []
-    # probabilties = {
-    #     "polarity_inversion": 0.1,
-    #     "real_noise": 0.2,
-    #     "reverb": 0.1,
-    #     "resample": 0.1,
-    #     "telephone": 0.1,
-    #     "colored_noise": 0.1,
-    #     "clipping": 0.05,
-    #     "codecs": 0.1,
-    # }
     probabilties = {
         "polarity_inversion": 0.1,
         "real_noise": 0.2,
         "reverb": 0.2,
-        "resample": 0.0, # untested (uses torchaudio, so could be slow)
+        "resample": 0.001, # slow, so we don't use it often
         "telephone": 0.2,
         "colored_noise": 0.2,
         "clipping": 0.1,
-        "codecs": 0.0, # untested (uses ffmpeg, could be problematic with multiple workers)
+        "codecs": 0.001, # slow, so we don't use it often
     }
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        # polarity inversion
-        if _random_flag(probabilties["polarity_inversion"]):
-            wave = aug_polarity_inversion(wave, sample_rate=SAMPLE_RATE)
-        # real noise
-        if _random_flag(probabilties["real_noise"]/2):
-            wave = aug_background_noise(wave, sample_rate=SAMPLE_RATE)
-            if wave.dtype == np.float64:
-                wave = wave.astype(np.float32)
-            augmentations.append("real_noise")
-        # reverberation
-        if _random_flag(probabilties["reverb"]):
-            wave, aug = add_reverberation(wave)
-            augmentations.append(aug)
-        # real noise
-        if _random_flag(probabilties["real_noise"]/2) and "real_noise" not in augmentations:
-            wave = aug_background_noise(wave, sample_rate=SAMPLE_RATE)
-            augmentations.append("real_noise")
-        # resample
-        if _random_flag(probabilties["resample"]):
-            wave, aug = resample(wave)
-            augmentations.append(aug)
-        # telephone or radio
-        if _random_flag(probabilties["telephone"]):
-            wave, aug = add_telephone_or_radio(wave)
-            augmentations.append(aug)
-        # additive noise
-        if _random_flag(probabilties["colored_noise"]):
-            wave, aug = add_colored_noise(wave)
-            augmentations.append(aug)
-        # clipping
-        if _random_flag(probabilties["clipping"]):
-            wave, aug = add_clipping(wave)
-            augmentations.append(aug)
-        # codecs
-        if _random_flag(probabilties["codecs"]):
-            wave, aug = add_codecs(wave)
-            augmentations.append(aug)
+        with Timeout(1, timeout_message): # we use a timeout to prevent hangs
+            # polarity inversion
+            if _random_flag(probabilties["polarity_inversion"]):
+                augmentations.append("polarity_inversion")
+                wave = aug_polarity_inversion(wave, sample_rate=SAMPLE_RATE)
+            # real noise
+            if _random_flag(probabilties["real_noise"]/2):
+                augmentations.append("real_noise")
+                wave = aug_background_noise(wave, sample_rate=SAMPLE_RATE)
+                if wave.dtype == np.float64:
+                    wave = wave.astype(np.float32)
+            # reverberation
+            if _random_flag(probabilties["reverb"]):
+                augmentations.append("reverb")
+                wave, aug = add_reverberation(wave)
+                augmentations.append(aug)
+            # real noise
+            if _random_flag(probabilties["real_noise"]/2) and "real_noise" not in augmentations:
+                augmentations.append("real_noise")
+                wave = aug_background_noise(wave, sample_rate=SAMPLE_RATE)
+            # resample
+            if _random_flag(probabilties["resample"]):
+                augmentations.append("resample")
+                wave, aug = resample(wave)
+                augmentations.append(aug)
+            # telephone or radio
+            if _random_flag(probabilties["telephone"]):
+                augmentations.append("telephone")
+                wave, aug = add_telephone_or_radio(wave)
+                augmentations.append(aug)
+            # additive noise
+            if _random_flag(probabilties["colored_noise"]):
+                augmentations.append("colored_noise")
+                wave, aug = add_colored_noise(wave)
+                augmentations.append(aug)
+            # clipping
+            if _random_flag(probabilties["clipping"]):
+                augmentations.append("clipping")
+                wave, aug = add_clipping(wave)
+                augmentations.append(aug)
+            # codecs
+            if _random_flag(probabilties["codecs"]):
+                augmentations.append("codecs")
+                wave, aug = add_codecs(wave)
+                augmentations.append(aug)
     if len(augmentations) == 0:
         augmentations.append("none")
 

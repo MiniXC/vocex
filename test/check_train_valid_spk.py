@@ -10,20 +10,11 @@ dev = dataset["dev"]
 
 dev_spk = set(dev["speaker"])
 
-rmv_spk = []
+train_spk = set(train["speaker"])
 
-for item in tqdm(dataset["train"]):
-    spk = item["speaker"]
-    if spk in dev_spk:
-        # remove speaker from dev_spk
-        dev_spk.remove(spk)
-        rmv_spk.append(spk)
-        # print dev_spk length
-        print(len(dev_spk))
-    elif spk not in rmv_spk:
-        raise ValueError(f"Speaker {spk} not in dev set!")
-    
+print(f"dev has {len(dev_spk)} speakers")
+print(f"train has {len(train_spk)} speakers")
 
-if len(dev_spk) > 0:
-    print("dev_spk not empty!")
-    print(dev_spk)
+# difference
+print(f"train - dev: {train_spk - dev_spk}")
+print(f"dev - train: {dev_spk - train_spk}")

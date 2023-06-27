@@ -318,7 +318,12 @@ class Vocex2Model(nn.Module):
             num_layers=nlayers,
         )
 
-        self.measure_output_layer = nn.Linear(filter_size, num_outputs)
+        self.measure_output_layer = nn.Sequential(
+            nn.Linear(filter_size, filter_size),
+            nn.BatchNorm1d(filter_size),
+            nn.GELU(),
+            nn.Linear(filter_size, num_outputs),
+        )   
 
         self.speaker_output_layer = nn.Sequential(
             nn.Linear(filter_size, speaker_emb_dim),

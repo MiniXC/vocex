@@ -71,11 +71,11 @@ class Vocex2Args:
     pretrained_vocex: str = "cdminix/vocex"
     measures: str = "energy,pitch,voice_activity_binary"
     max_epochs: int = 50
-    learning_rate: float = 1e-4
+    learning_rate: float = 8e-5
     warmup_steps: int = 1000
     weight_decay: float = 0.01
     log_every: int = 500
-    eval_every: int = 5000
+    eval_every: int = 1000
     save_every: int = 5000
     checkpoint_dir: str = "checkpoints"
     resume_from_checkpoint: str = "checkpoints/vx2-model-5000.pt"
@@ -85,5 +85,5 @@ class Vocex2Args:
     # no softdtw
     # wandb
     wandb_project: str = "vocex2"
-    wandb_run_name: str = "baseline_augmentations"
+    wandb_run_name: str = "baseline_more_augmentations"
     wandb_mode: str = "online"
