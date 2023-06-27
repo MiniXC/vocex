@@ -16,12 +16,13 @@ import matplotlib.pyplot as plt
 import numpy as np
 from collections import deque
 from transformers import get_linear_schedule_with_warmup
+from sklearn.metrics import accuracy_score, f1_score, confusion_matrix
 #import torch_xla.debug.profiler as xp
 
 from vocex import Vocex, Vocex2Model
 from training.arguments import Vocex2Args
 from vocex.speaker_loss import SpeakerLoss
-from .augmentations import wave_augmentation_func, mel_augmentation_func
+from augmentations import wave_augmentation_func, mel_augmentation_func
 
 def save_model(path, accelerator, model):
     unwrapped_model = accelerator.unwrap_model(model)
@@ -41,6 +42,7 @@ def eval_model(model, eval_dl, speaker_loss, measure_loss, vocex_model, args):
         },
     }
     speaker_preds = []
+    speaker_true = []
     with torch.no_grad():
         for batch in tqdm(eval_dl, desc="evaluating"):
             vocex_outputs = vocex_model(
@@ -54,14 +56,17 @@ def eval_model(model, eval_dl, speaker_loss, measure_loss, vocex_model, args):
                 for m in args.measures
             }
             speaker = batch["speaker"]
+            speaker_true += speaker.tolist()
             augmented_mel = batch["augmented_mel"]
             outputs = model(
                 mel=augmented_mel,
             )
-            speaker_loss_val = speaker_loss(
+            speaker_loss_val, speaker_pred = speaker_loss(
                 outputs["speaker_embedding"],
                 speaker,
+                return_pred=True,
             )
+            speaker_preds += speaker_pred.argmax(dim=-1).tolist()
             measure_loss_val = {
                 m: measure_loss(
                     outputs["measures"][m],
@@ -74,6 +79,21 @@ def eval_model(model, eval_dl, speaker_loss, measure_loss, vocex_model, args):
             loss_dict["eval/speaker_loss"].append(speaker_loss_val.item())
             for m in args.measures:
                 loss_dict[f"eval/{m}_loss"].append(measure_loss_val[m].item())
+    accuracy = accuracy_score(speaker_true, speaker_preds)
+    f1 = f1_score(speaker_true, speaker_preds, average="macro")
+    cm = confusion_matrix(speaker_true, speaker_preds)
+    fig = plt.figure(figsize=(16, 16))
+    sns.heatmap(cm, annot=True, fmt="d", cmap="Blues")
+    wandb.log({
+        "eval/speaker_accuracy": accuracy,
+        "eval/speaker_f1": f1,
+        "eval/speaker_confusion": wandb.Image(fig),
+    })
+    plt.close(fig)
+    print({
+        "eval/speaker_accuracy": np.round(accuracy, 4),
+        "eval/speaker_f1": np.round(f1, 4),
+    })
     model.train()
     wandb.log({
         k: np.mean(v)
@@ -138,6 +158,7 @@ def main():
         shuffle=True,
         collate_fn=collator.collate_fn,
         num_workers=args.num_workers,
+        prefetch_factor=3,
     )
 
     eval_dl = DataLoader(
@@ -155,6 +176,11 @@ def main():
         dropout=args.dropout,
         speaker_emb_dim=args.speaker_embedding_size,
     )
+
+    if args.resume_from_checkpoint is not None:
+        model.load_state_dict(
+            torch.load(args.resume_from_checkpoint),
+        )
 
     print("Model parameters (M):", sum(p.numel() for p in model.parameters()) / 1_000_000)
 

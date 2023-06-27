@@ -7,10 +7,13 @@ class SpeakerLoss(nn.Module):
         super().__init__()
         self.linear = nn.Linear(hidden_size, num_speakers)
 
-    def forward(self, speaker_embedding, speaker):
+    def forward(self, speaker_embedding, speaker, return_pred=False):
         speaker_output = self.linear(speaker_embedding)
         speaker_loss = nn.CrossEntropyLoss()(speaker_output, speaker)
-        return speaker_loss
+        if not return_pred:
+            return speaker_loss
+        else:
+            return speaker_loss, speaker_output
     
 class AngularMarginLoss(nn.Module):
     """
