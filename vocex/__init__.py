@@ -266,12 +266,15 @@ class Vocex():
         measure = _interpolate(measure, vad)
         return measure
 
-    def __call__(self, audio, sr=22050, return_activations=False, return_attention=False, speaker_avatar=False):
+    def __call__(self, audio, sr=22050, return_activations=False, return_attention=False, speaker_avatar=False, device=None):
         """ Perform inference on given audio. """
         is_onnx = hasattr(self.model, "onnx_export") and self.model.onnx_export
 
         # preprocess
         mel = self._preprocess(audio, sr)
+        if device is not None:
+            mel = mel.to(device)
+            self.model.to(device)
         # forward pass
         with torch.no_grad():
             if self.seed is not None:
