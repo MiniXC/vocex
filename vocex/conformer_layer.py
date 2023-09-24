@@ -3,6 +3,7 @@ from torch.nn import TransformerEncoderLayer
 
 from .utils import DepthwiseConv1d
 
+
 class ConformerLayer(TransformerEncoderLayer):
     def __init__(self, *args, **kwargs):
         old_kwargs = {k: v for k, v in kwargs.items() if "conv_" not in k}
@@ -36,20 +37,29 @@ class ConformerLayer(TransformerEncoderLayer):
                 padding=(kwargs["conv_kernel"][1] - 1) // 2,
             )
 
-    def forward(self, src, src_mask=None, src_key_padding_mask=None, need_weights=False):
+    def forward(
+        self, src, src_mask=None, src_key_padding_mask=None, need_weights=False
+    ):
         x = src
         if self.norm_first:
             if not need_weights:
                 attn = self._sa_block(self.norm1(x), src_mask, src_key_padding_mask)
             else:
-                attn, weights = self._sa_block(self.norm1(x), src_mask, src_key_padding_mask, need_weights=need_weights)
+                attn, weights = self._sa_block(
+                    self.norm1(x),
+                    src_mask,
+                    src_key_padding_mask,
+                    need_weights=need_weights,
+                )
             x = x + attn
             x = x + self._ff_block(self.norm2(x))
         else:
             if not need_weights:
                 attn = self._sa_block(x, src_mask, src_key_padding_mask)
             else:
-                attn, weights = self._sa_block(x, src_mask, src_key_padding_mask, need_weights=need_weights)
+                attn, weights = self._sa_block(
+                    x, src_mask, src_key_padding_mask, need_weights=need_weights
+                )
             x = self.norm1(x + attn)
             x = self.norm2(x + self._ff_block(x))
         if need_weights:
@@ -64,22 +74,25 @@ class ConformerLayer(TransformerEncoderLayer):
         return self.dropout2(x)
 
     def _sa_block(
-            self, 
-            x,
-            attn_mask,
-            key_padding_mask=None,
-            need_weights=False,
-        ):
+        self,
+        x,
+        attn_mask,
+        key_padding_mask=None,
+        need_weights=False,
+    ):
         if not need_weights:
-            x = self.self_attn(x, x, x,
-                            attn_mask=attn_mask,
-                            key_padding_mask=key_padding_mask,
-                            need_weights=need_weights)[0]
+            x = self.self_attn(
+                x,
+                x,
+                x,
+            )[0]
         else:
-            x, weights = self.self_attn(x, x, x,
-                            attn_mask=attn_mask,
-                            key_padding_mask=key_padding_mask,
-                            need_weights=need_weights)
+            x, weights = self.self_attn(
+                x,
+                x,
+                x,
+                need_weights=need_weights,
+            )
         if need_weights:
             return self.dropout1(x), weights
         else:

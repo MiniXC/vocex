@@ -8,8 +8,8 @@ from .utils import Transpose, NoamLR
 from .softdtw import SoftDTW
 from .pooling import AttentiveStatsPooling
 
-class VocexModel(nn.Module):
 
+class VocexModel(nn.Module):
     def __init__(
         self,
         measures=["energy", "pitch", "srmr", "snr"],
@@ -31,7 +31,7 @@ class VocexModel(nn.Module):
         num_outputs = len(self.measures)
 
         self.loss_compounds = self.measures + ["dvector"]
-        
+
         self.in_layer = nn.Linear(in_channels, filter_size)
 
         self.positional_encoding = PositionalEncoding(filter_size)
@@ -57,7 +57,7 @@ class VocexModel(nn.Module):
             nn.ReLU(),
             nn.Linear(1024, num_outputs),
         )
-        
+
         self.dvector_conv_in_layer = nn.Linear(filter_size, filter_size)
         self.dvector_x_in_layer = nn.Linear(in_channels, filter_size)
 
@@ -76,7 +76,7 @@ class VocexModel(nn.Module):
         )
 
         dvector_input_dim = filter_size * 2
-        
+
         self.dvector_linear = nn.Sequential(
             nn.Linear(dvector_input_dim, 1024),
             nn.ReLU(),
@@ -86,7 +86,8 @@ class VocexModel(nn.Module):
         )
 
         self.scaler_dict = {
-            k: GaussianMinMaxScaler(10) for k in self.measures
+            k: GaussianMinMaxScaler(10)
+            for k in self.measures
             if not k.endswith("_binary")
         }
         self.scaler_dict["mel"] = GaussianMinMaxScaler(10)
@@ -133,7 +134,9 @@ class VocexModel(nn.Module):
         # reset scalers
         for k in self.scalers:
             self.scalers[k].is_fit = False
-        for i, batch in tqdm(enumerate(dataloader), desc="Fitting scalers", total=n_batches):
+        for i, batch in tqdm(
+            enumerate(dataloader), desc="Fitting scalers", total=n_batches
+        ):
             self.scalers["mel"].partial_fit(batch["mel"])
             for k in self.measures:
                 if not k.endswith("_binary"):
@@ -144,21 +147,35 @@ class VocexModel(nn.Module):
         for k in self.scalers:
             self.scalers[k].is_fit = True
 
-    def forward(self, mel, dvector=None, measures=None, inference=False, return_activations=False, return_attention=False):
+    def forward(
+        self,
+        mel,
+        dvector=None,
+        measures=None,
+        inference=False,
+        return_activations=False,
+        return_attention=False,
+    ):
         mel_padding_mask = mel.sum(dim=-1) != 0
         mel_padding_mask = mel_padding_mask.to(mel.dtype)
 
         if return_activations:
-            self.layers.return_additional_layers = list(range(self.hparams["measure_nlayers"]))
+            self.layers.return_additional_layers = list(
+                range(self.hparams["measure_nlayers"])
+            )
 
         if not self.scalers["mel"].is_fit:
             self.scalers["mel"].partial_fit(mel)
         x = self.scalers["mel"].transform(mel)
-        is_onnx = (hasattr(self, "onnx_export") and self.onnx_export)
+        is_onnx = hasattr(self, "onnx_export") and self.onnx_export
         if is_onnx:
-            random_noise = (torch.randn_like(x, dtype=float) * x.std() + x.mean()) * self.noise_factor
+            random_noise = (
+                torch.randn_like(x, dtype=float) * x.std() + x.mean()
+            ) * self.noise_factor
         else:
-            random_noise = (torch.randn_like(x) * x.std() + x.mean()) * self.noise_factor
+            random_noise = (
+                torch.randn_like(x) * x.std() + x.mean()
+            ) * self.noise_factor
         if is_onnx:
             x_dtype = x.dtype
             x = x + random_noise
@@ -167,7 +184,9 @@ class VocexModel(nn.Module):
             x = x + random_noise
         out = self.in_layer(x)
         out = self.positional_encoding(out)
-        res = self.layers(out, src_key_padding_mask=mel_padding_mask, need_weights=return_attention)
+        res = self.layers(
+            out, src_key_padding_mask=mel_padding_mask, need_weights=return_attention
+        )
         if return_activations:
             activations = res["activations"]
             out_conv = res["output"]
@@ -192,23 +211,34 @@ class VocexModel(nn.Module):
             loss_dict = {}
             for measure in self.measures:
                 if not measure.endswith("_binary"):
-                    measure_true[measure] = self.scalers[measure].transform(measures[measure])
+                    measure_true[measure] = self.scalers[measure].transform(
+                        measures[measure]
+                    )
                 else:
                     measure_true[measure] = measures[measure]
             measures_losses = []
             for measure in self.measures:
                 if measure.endswith("_binary"):
-                    m_loss = nn.BCEWithLogitsLoss()(measure_results[measure]*mel_padding_mask, measure_true[measure]*mel_padding_mask)
+                    m_loss = nn.BCEWithLogitsLoss()(
+                        measure_results[measure] * mel_padding_mask,
+                        measure_true[measure] * mel_padding_mask,
+                    )
                 else:
                     if not self.use_softdtw:
-                        m_loss = nn.MSELoss()(measure_results[measure]*mel_padding_mask, measure_true[measure]*mel_padding_mask)
+                        m_loss = nn.MSELoss()(
+                            measure_results[measure] * mel_padding_mask,
+                            measure_true[measure] * mel_padding_mask,
+                        )
                     else:
                         if self.verbose:
                             print(measure_results[measure], measure_true[measure])
-                        m_loss = self.softdtw(
-                            measure_results[measure]*mel_padding_mask,
-                            measure_true[measure]*mel_padding_mask,
-                        ) / 1000
+                        m_loss = (
+                            self.softdtw(
+                                measure_results[measure] * mel_padding_mask,
+                                measure_true[measure] * mel_padding_mask,
+                            )
+                            / 1000
+                        )
                 loss_dict[measure] = m_loss
                 measures_losses.append(m_loss)
             loss = sum(measures_losses) / len(self.measures)
@@ -218,7 +248,9 @@ class VocexModel(nn.Module):
         # predict d-vector using global average and max pooling as input
         out_conv_dvec = self.dvector_conv_in_layer(out_conv)
         x = self.dvector_x_in_layer(x)
-        out_dvec = self.dvector_layers(out_conv_dvec + x, src_key_padding_mask=mel_padding_mask)
+        out_dvec = self.dvector_layers(
+            out_conv_dvec + x, src_key_padding_mask=mel_padding_mask
+        )
         dvector_input = torch.cat(
             [
                 torch.mean(out_dvec, dim=1),
@@ -256,10 +288,14 @@ class VocexModel(nn.Module):
                         measure_results[measure]
                     )
                 else:
-                    measure_results[measure] = torch.sigmoid(measure_results[measure]).detach()
+                    measure_results[measure] = torch.sigmoid(
+                        measure_results[measure]
+                    ).detach()
             dvector_pred = self.scalers["dvector"].inverse_transform(dvector_pred)
             if is_onnx:
-                return [measure_results[measure] for measure in self.measures] + [dvector_pred]
+                return [measure_results[measure] for measure in self.measures] + [
+                    dvector_pred
+                ]
             results = {
                 "loss": loss,
                 "compound_losses": loss_dict,
@@ -271,6 +307,7 @@ class VocexModel(nn.Module):
             if return_attention:
                 results["attention"] = [a.detach() for a in attention]
             return results
+
 
 class Vocex2Model(nn.Module):
     """
@@ -323,7 +360,7 @@ class Vocex2Model(nn.Module):
             nn.BatchNorm1d(filter_size),
             nn.GELU(),
             nn.Linear(filter_size, num_outputs),
-        )   
+        )
 
         self.speaker_output_layer = nn.Sequential(
             nn.Linear(filter_size, speaker_emb_dim),
@@ -365,10 +402,7 @@ class Vocex2Model(nn.Module):
         measures = self.measure_output_layer(x)
         speaker_emb = self.speaker_output_layer(x)
         return {
-            "measures": {
-                m: measures[:, :, i] for i, m in enumerate(self.measures)
-            },
+            "measures": {m: measures[:, :, i] for i, m in enumerate(self.measures)},
             "speaker_embedding": speaker_emb,
             "padding_mask": mel_padding_mask,
         }
-

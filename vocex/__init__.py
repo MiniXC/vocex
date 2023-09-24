@@ -14,9 +14,10 @@ from .conformer_model import VocexModel, Vocex2Model
 from .image_helpers import QuantizeToGivenPalette, transformYIQ2RGB
 from .onnx_stft import TacotronSTFT
 
-class Vocex():
-    """ 
-    This is a wrapper class for the vocex model. 
+
+class Vocex:
+    """
+    This is a wrapper class for the vocex model.
     It is used to load the model and perform inference on given audio file(s).
     """
 
@@ -25,8 +26,10 @@ class Vocex():
         return torch.log(torch.clamp(x, min=clip_val) * C)
 
     @staticmethod
-    def from_pretrained(model, compressed=True, for_onnx=False, fp16=True, **postprocess_kwargs):
-        """ 
+    def from_pretrained(
+        model, compressed=True, for_onnx=False, fp16=True, **postprocess_kwargs
+    ):
+        """
         Load a pretrained model from a given .pt file.
         Also accepts huggingface model names.
         """
@@ -114,13 +117,13 @@ class Vocex():
                 elif measure == "energy":
                     self.postprocess_kwargs[measure]["vad_threshold_min"] = 0.0
                     self.postprocess_kwargs[measure]["vad_threshold_max"] = 1.0
-                
+
         # set to eval mode
         self.model.eval()
         self.seed = seed
 
     def save_checkpoint(self, path, compressed=True):
-        """ Save the model to a given path. """
+        """Save the model to a given path."""
         # get state dict
         state_dict = self.model.state_dict()
         # get model args
@@ -129,22 +132,30 @@ class Vocex():
         if compressed:
             # compress
             with gzip.open(path, "wb") as f:
-                torch.save({
+                torch.save(
+                    {
+                        "state_dict": state_dict,
+                        "model_args": model_args,
+                    },
+                    f,
+                )
+        else:
+            torch.save(
+                {
                     "state_dict": state_dict,
                     "model_args": model_args,
-                }, f)
-        else:
-            torch.save({
-                "state_dict": state_dict,
-                "model_args": model_args,
-            }, path)
+                },
+                path,
+            )
 
     @staticmethod
     def _interpolate(x):
         if isinstance(x, torch.Tensor):
             x = x.cpu().numpy()
+
         def nan_helper(y):
             return np.isnan(y), lambda z: z.nonzero()[0]
+
         nans, y = nan_helper(x)
         if not np.all(nans):
             x[nans] = np.interp(y(nans), y(~nans), x[~nans])
@@ -153,12 +164,20 @@ class Vocex():
         return torch.tensor(x)
 
     def _preprocess(self, audio, sr=22050):
-        """ Preprocess audio. """
+        """Preprocess audio."""
         if isinstance(audio, list):
             # pad to same length
             max_length = max([a.shape[-1] for a in audio])
-            audio = [torch.from_numpy(a).float() if isinstance(a, np.ndarray) else a for a in audio]
-            audio = [torch.nn.functional.pad(a, (0, max_length - a.shape[-1]), mode="constant", value=0) for a in audio]
+            audio = [
+                torch.from_numpy(a).float() if isinstance(a, np.ndarray) else a
+                for a in audio
+            ]
+            audio = [
+                torch.nn.functional.pad(
+                    a, (0, max_length - a.shape[-1]), mode="constant", value=0
+                )
+                for a in audio
+            ]
             # stack
             audio = torch.stack(audio)
         # convert to tensor
@@ -184,6 +203,8 @@ class Vocex():
             audio = audio / audio.abs().max(dim=-1, keepdim=True)[0]
         # convert to spectrogram
         mel = self.mel_spectrogram(audio)
+        # take square root
+        # mel = torch.sqrt(mel)
         # convert to mel spectrogram
         mel = torch.matmul(self.mel_basis, mel)
         # dynamic range compression
@@ -207,7 +228,8 @@ class Vocex():
         vad_threshold_min=0.0,
         vad_threshold_max=1.0,
     ):
-        """ Postprocess a given measure. """
+        """Postprocess a given measure."""
+
         def _interpolate(measure, vad):
             if vad is not None and (vad_threshold_min > 0 or vad_threshold_max < 1):
                 # apply voice activity detection
@@ -235,7 +257,9 @@ class Vocex():
             elif convolution_window == "blackman":
                 window = torch.blackman_window(convolution_window_size)
             else:
-                raise ValueError("convolution_window must be one of 'hann', 'hamming', or 'blackman'")
+                raise ValueError(
+                    "convolution_window must be one of 'hann', 'hamming', or 'blackman'"
+                )
             window = window / window.sum()
             window = window.unsqueeze(0).unsqueeze(0)
             # use convolution from torch.nn.functional
@@ -243,11 +267,20 @@ class Vocex():
             if not isinstance(measure, torch.Tensor):
                 measure = torch.tensor(measure)
             if measure.shape[-1] < convolution_window_size:
-                # if measure is too short, we need to pad it with zeros on 
-                measure = torch.nn.functional.pad(measure, (convolution_window_size // 2, convolution_window_size // 2), mode="constant", value=0)
+                # if measure is too short, we need to pad it with zeros on
+                measure = torch.nn.functional.pad(
+                    measure,
+                    (convolution_window_size // 2, convolution_window_size // 2),
+                    mode="constant",
+                    value=0,
+                )
                 print("WARNING: measure is too short, padding with zeros")
             else:
-                measure = torch.nn.functional.pad(measure, (convolution_window_size // 2, convolution_window_size // 2), mode="reflect")
+                measure = torch.nn.functional.pad(
+                    measure,
+                    (convolution_window_size // 2, convolution_window_size // 2),
+                    mode="reflect",
+                )
             if measure.ndim == 1:
                 # add batch dimension if necessary
                 measure = measure.unsqueeze(0)
@@ -255,23 +288,43 @@ class Vocex():
                 with warnings.catch_warnings():
                     # ignore warning about conv1d being deprecated
                     warnings.simplefilter("ignore")
-                    measure = torch.nn.functional.conv1d(measure, window, padding="same")
+                    measure = torch.nn.functional.conv1d(
+                        measure, window, padding="same"
+                    )
             else:
-                measure = torch.stack([torch.nn.functional.conv1d(m.unsqueeze(0), window, padding="same") for m in measure]).squeeze(1)
+                measure = torch.stack(
+                    [
+                        torch.nn.functional.conv1d(
+                            m.unsqueeze(0), window, padding="same"
+                        )
+                        for m in measure
+                    ]
+                ).squeeze(1)
             # remove padding
-            measure = measure[:, convolution_window_size // 2:-convolution_window_size // 2]
+            measure = measure[
+                :, convolution_window_size // 2 : -convolution_window_size // 2
+            ]
         if normalize:
             # normalize
             measure = measure / measure.abs().max(dim=-1, keepdim=True)[0]
         measure = _interpolate(measure, vad)
         return measure
 
-    def __call__(self, audio, sr=22050, return_activations=False, return_attention=False, speaker_avatar=False, device=None):
-        """ Perform inference on given audio. """
+    def __call__(
+        self,
+        audio,
+        sr=22050,
+        return_activations=False,
+        return_attention=False,
+        speaker_avatar=False,
+        device=None,
+    ):
+        """Perform inference on given audio."""
         is_onnx = hasattr(self.model, "onnx_export") and self.model.onnx_export
 
         # preprocess
         mel = self._preprocess(audio, sr)
+
         if device is not None:
             mel = mel.to(device)
             self.model.to(device)
@@ -280,13 +333,22 @@ class Vocex():
             if self.seed is not None:
                 torch.manual_seed(self.seed)
                 np.random.seed(self.seed)
-            out = self.model(mel, inference=True, return_activations=return_activations, return_attention=return_attention)
+            out = self.model(
+                mel,
+                inference=True,
+                return_activations=return_activations,
+                return_attention=return_attention,
+            )
 
         if return_activations:
-            out["activations"] = torch.stack(out["activations"]).transpose(0, 1).cpu().numpy()
-        
+            out["activations"] = (
+                torch.stack(out["activations"]).transpose(0, 1).cpu().numpy()
+            )
+
         if return_attention:
-            out["attention"] = torch.stack(out["attention"]).transpose(0, 1).cpu().numpy()
+            out["attention"] = (
+                torch.stack(out["attention"]).transpose(0, 1).cpu().numpy()
+            )
 
         if not is_onnx:
             del out["loss"]
@@ -298,13 +360,21 @@ class Vocex():
                 out["measures"][measure] = out["measures"][measure].cpu().numpy()
         # do voice activity postprocessing first
         voice_activity = None
-        if "voice_activity_binary" in out["measures"] or (is_onnx and "voice_activity_binary" in self.model.measures):
+        if "voice_activity_binary" in out["measures"] or (
+            is_onnx and "voice_activity_binary" in self.model.measures
+        ):
             if not is_onnx:
                 voice_activity_vals = out["measures"]["voice_activity_binary"]
             else:
                 # use index of voice activity in self.model.measures
-                voice_activity_vals = out[self.model.measures.index("voice_activity_binary")]
-            voice_activity = self.postprocess(voice_activity_vals, None, **self.postprocess_kwargs["voice_activity_binary"])
+                voice_activity_vals = out[
+                    self.model.measures.index("voice_activity_binary")
+                ]
+            voice_activity = self.postprocess(
+                voice_activity_vals,
+                None,
+                **self.postprocess_kwargs["voice_activity_binary"]
+            )
             if not is_onnx:
                 out["measures"]["voice_activity_binary"] = voice_activity
         # do other postprocessing
@@ -315,18 +385,21 @@ class Vocex():
                 else:
                     # use index of measure in self.model.measures
                     measure_vals = out[self.model.measures.index(measure)]
-                measure_vals = self.postprocess(measure_vals, voice_activity, **self.postprocess_kwargs[measure])
+                measure_vals = self.postprocess(
+                    measure_vals, voice_activity, **self.postprocess_kwargs[measure]
+                )
                 if not is_onnx:
                     out["measures"][measure] = measure_vals
                 else:
                     # use index of measure in self.model.measures
                     out[self.model.measures.index(measure)] = measure_vals
-        
+
         if not is_onnx:
             out["dvector"] = out["dvector"].cpu().numpy()
         if speaker_avatar:
             from scipy import ndimage
             import seaborn as sns
+
             avatars = []
             for dvec in out["dvector"]:
                 # convert to 8 x 8 x 2
@@ -359,26 +432,42 @@ class Vocex():
                 if isinstance(out[measure], torch.Tensor):
                     out[measure] = out[measure].cpu().numpy()
             if "snr" in out["measures"] and "voice_activity_binary" in out["measures"]:
-                out["overall_snr"] = (out["measures"]["snr"] * out["measures"]["voice_activity_binary"]).sum(axis=-1) / out["measures"]["voice_activity_binary"].sum(axis=-1)
+                out["overall_snr"] = (
+                    out["measures"]["snr"] * out["measures"]["voice_activity_binary"]
+                ).sum(axis=-1) / out["measures"]["voice_activity_binary"].sum(axis=-1)
             if "srmr" in out["measures"] and "voice_activity_binary" in out["measures"]:
                 va_mask = out["measures"]["voice_activity_binary"] > 0.5
-                out["overall_srmr"] = (out["measures"]["srmr"] * va_mask).sum(axis=-1) / va_mask.sum(axis=-1)
+                out["overall_srmr"] = (out["measures"]["srmr"] * va_mask).sum(
+                    axis=-1
+                ) / va_mask.sum(axis=-1)
                 if np.isnan(out["overall_srmr"]).any():
-                    out["overall_srmr"][np.isnan(out["overall_srmr"])] = out["measures"]["srmr"][np.isnan(out["overall_srmr"])].mean(axis=-1)
-            if "pitch" in out["measures"] and "voice_activity_binary" in out["measures"]:
-                out["overall_pitch"] = (out["measures"]["pitch"] * out["measures"]["voice_activity_binary"]).sum(axis=-1) / out["measures"]["voice_activity_binary"].sum(axis=-1)
-            if "energy" in out["measures"] and "voice_activity_binary" in out["measures"]:
-                out["overall_energy"] = (out["measures"]["energy"] * out["measures"]["voice_activity_binary"]).sum(axis=-1) / out["measures"]["voice_activity_binary"].sum(axis=-1)
+                    out["overall_srmr"][np.isnan(out["overall_srmr"])] = out[
+                        "measures"
+                    ]["srmr"][np.isnan(out["overall_srmr"])].mean(axis=-1)
+            if (
+                "pitch" in out["measures"]
+                and "voice_activity_binary" in out["measures"]
+            ):
+                out["overall_pitch"] = (
+                    out["measures"]["pitch"] * out["measures"]["voice_activity_binary"]
+                ).sum(axis=-1) / out["measures"]["voice_activity_binary"].sum(axis=-1)
+            if (
+                "energy" in out["measures"]
+                and "voice_activity_binary" in out["measures"]
+            ):
+                out["overall_energy"] = (
+                    out["measures"]["energy"] * out["measures"]["voice_activity_binary"]
+                ).sum(axis=-1) / out["measures"]["voice_activity_binary"].sum(axis=-1)
         return out
-    
+
 
 class OnnxVocexWrapper(nn.Module):
     """
     Same as above, but with one-size-fits-all postprocessing (simple smoothing)
     """
-    
+
     def from_pretrained(model_file, compressed=True):
-        """ 
+        """
         Load a pretrained model from a given .pt file.
         Also accepts huggingface model names.
         """
@@ -392,7 +481,7 @@ class OnnxVocexWrapper(nn.Module):
         model = VocexModel(**model_args)
         model.load_state_dict(checkpoint["state_dict"])
         return OnnxVocexWrapper(model)
-    
+
     def __init__(self, model):
         super().__init__()
         self.model = model
@@ -418,7 +507,7 @@ class OnnxVocexWrapper(nn.Module):
         self.model.onnx_export = True
 
     def _preprocess(self, audio, sr=22050):
-        """ Preprocess audio, we only need to take batch size 1 into account. """
+        """Preprocess audio, we only need to take batch size 1 into account."""
         # convert to tensor
         if isinstance(audio, np.ndarray):
             audio = torch.from_numpy(audio).float()
@@ -446,9 +535,9 @@ class OnnxVocexWrapper(nn.Module):
             mel = mel.unsqueeze(0)
         mel = mel.transpose(1, 2)
         return mel
-    
+
     def forward(self, audio, sr=22050):
-        """ Perform inference on given audio. Return list instead of dict. """
+        """Perform inference on given audio. Return list instead of dict."""
         # preprocess
         mel = self._preprocess(audio, sr)
         # forward pass

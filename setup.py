@@ -2,7 +2,7 @@ from setuptools import setup, find_packages
 
 setup(
     name="vocex",
-    version="0.1.9",
+    version="0.1.10",
     description="Voice Frame-Level and Utterance-Level Attribute Extraction",
     author="Christoph Minixhofer",
     author_email="christoph.minixhofer@gmail.com",
@@ -19,4 +19,3 @@ setup(
 )
 
 # training on tpus seems to be broken on accelerate 0.20+, 0.19.0 works
-
