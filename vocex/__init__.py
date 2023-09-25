@@ -396,6 +396,7 @@ class Vocex:
 
         if not is_onnx:
             out["dvector"] = out["dvector"].cpu().numpy()
+            out["dvector_time"] = out["dvector_time"].cpu().numpy()
         if speaker_avatar:
             from scipy import ndimage
             import seaborn as sns

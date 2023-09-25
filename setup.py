@@ -2,7 +2,7 @@ from setuptools import setup, find_packages
 
 setup(
     name="vocex",
-    version="0.1.10",
+    version="0.1.11",
     description="Voice Frame-Level and Utterance-Level Attribute Extraction",
     author="Christoph Minixhofer",
     author_email="christoph.minixhofer@gmail.com",

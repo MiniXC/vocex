@@ -301,6 +301,7 @@ class VocexModel(nn.Module):
                 "compound_losses": loss_dict,
                 "measures": measure_results,
                 "dvector": dvector_pred,
+                "dvector_time": out_dvec,
             }
             if return_activations:
                 results["activations"] = [a.detach() for a in activations]
